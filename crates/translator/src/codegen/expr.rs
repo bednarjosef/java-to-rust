@@ -571,6 +571,10 @@ impl<'a> Gen<'a> {
                 self.plain_call = outer_plain;
                 self.raising(code, index)
             }
+            // A getter's call on an object on the stack, whose field a local took from its slot.
+            ExprKind::MethodCall { .. } if let Some(local) = self.loop_fields.get(&e.id) => {
+                Code::atom(local.clone())
+            }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
                 // The calls in the receiver and the arguments are written with their own names.

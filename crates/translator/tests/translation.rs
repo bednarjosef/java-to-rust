@@ -6875,7 +6875,9 @@ fn a_class_extending_number_implements_it_and_byte_value_narrows_int_value() {
         )
     };
     let rust = translate(&class(""));
-    assert_contains(&rust, &["(n.int_value() as i8 as i32)"]);
+    // `intValue` is a getter of a field of an object on the stack, which a local takes from its
+    // slot (`n_v`); `byteValue` narrows it.
+    assert_contains(&rust, &["let n_v = unsafe { slot_1.object() }.v;", "(n_v as i8 as i32)"]);
     let err = java_to_rust::translate(&class("public byte byteValue() { return 1; }")).unwrap_err();
     assert!(err.to_string().contains("overriding `Number.byteValue` not supported yet"), "{err}");
 }
@@ -8238,5 +8240,80 @@ fn a_field_that_a_constructor_reads_through_a_call_before_setting_it_stays_check
     assert_contains(
         &rust,
         &["java::non_null(self.value.as_deref())", "java::non_null(self.text.as_deref())"],
+    );
+}
+
+#[test]
+fn fields_of_an_object_on_the_stack_are_read_from_its_slot_where_it_is_made() {
+    let rust = translate(
+        "class Vec3i {
+            private int x, y, z;
+            Vec3i(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
+            int getX() { return x; }
+            int getY() { return y; }
+            int getZ() { return z; }
+            protected void setX(int x) { this.x = x; }
+        }
+        class BlockPos extends Vec3i {
+            BlockPos(int x, int y, int z) { super(x, y, z); }
+            BlockPos above() { return new BlockPos(getX(), getY() + 1, getZ()); }
+        }
+        class MutablePos extends BlockPos {
+            MutablePos() { super(0, 0, 0); }
+            MutablePos set(int x) { setX(x); return this; }
+        }
+        final class Vec3 {
+            final double x, y, z;
+            Vec3(double x, double y, double z) { this.x = x; this.y = y; this.z = z; }
+        }
+        class Level {
+            int seed = 7;
+            BlockPos randomPos(int x0) {
+                seed = seed * 3 + 1013904223;
+                int v = seed >> 2;
+                return new BlockPos(x0 + (v & 15), v >> 16 & 15, v >> 8 & 15);
+            }
+        }
+        class A {
+            static BlockPos[] kept = new BlockPos[8];
+            static int n;
+            static int xOf(BlockPos p) { return p.getX(); }
+            public static void main(String[] a) {
+                Level level = new Level();
+                MutablePos m = new MutablePos();
+                long sum = 0;
+                double total = 0;
+                for (int i = 0; i < 1000; i++) {
+                    BlockPos pos = level.randomPos(i);
+                    sum += pos.getX() * 31 + pos.getY() - pos.getZ();
+                    if (pos.getY() == 3 && n < 8) kept[n++] = pos;
+                    sum += pos.getZ();
+                    BlockPos up = pos.above();
+                    sum += up.getY();
+                    Vec3 v = new Vec3(i, i * 0.5, 2);
+                    total += v.x + v.y * v.z;
+                }
+                m.set(5);
+                System.out.println(sum + \" \" + n + \" \" + xOf(m) + \" \" + total);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // The fields that the getters read, read from the factory's slot right after the call,
+            // not through the handle, which carries `BlockPos`'s class in its top bits.
+            "let mut pos = level.random_pos_on_stack(&slot_2, i);\n        \
+             let pos_x = *unsafe { slot_2.object() }.base.x.fixed();\n        \
+             let pos_y = *unsafe { slot_2.object() }.base.y.fixed();\n        \
+             let pos_z = *unsafe { slot_2.object() }.base.z.fixed();",
+            "pos_x.wrapping_mul(31).wrapping_add(pos_y).wrapping_sub(pos_z)",
+            "if pos_y == 3 && A_N.get() < 8 {",
+            // After the object may have left, a read goes through the handle.
+            "sum = sum.wrapping_add(BlockPos__get_z(pos) as i64);",
+            // An immutable point's fields, read directly.
+            "let v_x = unsafe { slot_3.object() }.x;",
+            "total += v_x + v_y * v_z;",
+        ],
     );
 }

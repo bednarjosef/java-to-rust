@@ -168,6 +168,20 @@ impl<T> Slot<T> {
         Arc { ptr, owns: PhantomData }
     }
 
+    /// The object in the slot, read where it is rather than through a handle: the translation
+    /// reads the fields of an object on the stack this way right after making it (docs/collector.md,
+    /// "Objects on the stack"), so the compiler sees the slot itself, whose stores it forwards to
+    /// the reads, where a handle's address hides the slot from it.
+    ///
+    /// # Safety
+    ///
+    /// An object was put in the slot.
+    #[inline(always)]
+    pub unsafe fn object(&self) -> &T {
+        // An object was put there, and is only ever written through its cells.
+        unsafe { (*self.value.get()).assume_init_ref() }
+    }
+
     /// Moves the object in the slot to the collected heap when `handle` names it, and makes
     /// `handle` name the moved object, keeping the class number in its top bits; does nothing
     /// when `handle` names anything else, or nothing. The translation calls it before a statement
