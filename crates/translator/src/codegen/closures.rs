@@ -354,7 +354,10 @@ impl<'a> Gen<'a> {
         // A body that never runs (`unreachable!`) would make the closure's type `!`.
         let never = matches!(&body[..], [Stmt::Expr(e)] if matches!(e.kind, ExprKind::Builtin(Builtin::NoObject { .. }, _)));
         let ret = if ret.is_empty() && never { " -> ()".to_string() } else { ret };
+        // The objects that stay in the lambda's method are made in slots of the closure's own.
+        let outer_slots = self.enter_inner_slots(body_method);
         self.stmts(body, true);
+        self.leave_inner_slots(outer_slots);
         self.bound_params = None;
         if self.throwing && self.class.methods[m].ret == Type::Void && exceptions::completes_all(body) {
             self.line("Ok(())");
@@ -405,7 +408,9 @@ impl<'a> Gen<'a> {
         if block && !bound {
             self.bind_params(index, &values);
         }
+        let outer_slots = self.enter_inner_slots(index);
         self.stmts(body, true);
+        self.leave_inner_slots(outer_slots);
         if self.throwing && self.class.methods[index].ret == Type::Void && exceptions::completes_all(body) {
             self.line("Ok(())");
         }

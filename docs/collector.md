@@ -337,17 +337,21 @@ The collector needs nothing for them:
 - **What it owns.** A slot is never dropped, as a heap object is not: memory its fields own (a
   `Vec`'s buffer, in the heap) is found unreachable once no frame or object points to it.
 
-A method declares at most 8 slots, and only for objects of up to 16 fields of a class that is
-not a Rust generic, an owned value or a closure. A call of a factory is written in its form on
-the stack only when it is one of the plain forms of a call (a static method, a method of the
-receiver's class, or a body on an enum without a dispatcher), or a call that dispatches among a
-few classes (the points-to facts' small sets, or a profiled call's classes before its whole
-dispatcher, docs/native-speed.md): the arm for the class that runs the factory passes the slot on.
-Any other is written as usual, its object goes in the heap, and the slot stays empty. A
-profiled call may run several methods, and is a source in its caller when what its profiled
-class runs is a factory: the other methods count for its arguments and what it returns, and
-their objects go in the heap. Translating with `JAVA_TO_RUST_HEAP_ONLY=1`
-puts every object in the heap.
+A slot holds an object of a class that is not a Rust generic, an owned value or a closure, and
+of at most about 128 bytes of fields (16 references, or 32 `int`s), and a method's slots take
+at most about 1 KB, eight of the largest, so that a method that recursion runs deep keeps a
+small frame. The body of a lambda that is written as a closure
+(docs/closures-and-nested-classes.md) declares slots of its own at its start, so each call of
+the closure, also one that the closure makes of itself, has its own objects. A call of a
+factory is written in its form on the stack only when it is one of the plain forms of a call (a
+static method, a method of the receiver's class, or a body on an enum without a dispatcher), or
+a call that dispatches among a few classes (the points-to facts' small sets, or a profiled
+call's classes before its whole dispatcher, docs/native-speed.md): the arm for the class that
+runs the factory passes the slot on. Any other is written as usual, its object goes in the
+heap, and the slot stays empty. A profiled call may run several methods, and is a source in its
+caller when what its profiled class runs is a factory: the other methods count for its
+arguments and what it returns, and their objects go in the heap. Translating with
+`JAVA_TO_RUST_HEAP_ONLY=1` puts every object in the heap.
 
 ## Marking and sweeping in parallel
 
