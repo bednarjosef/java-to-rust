@@ -154,7 +154,35 @@ fn parse(s: &java::Wtf8) -> Result<i32, Throwable> {
 ```
 
 - **Override groups agree**: if one member returns `Result`, all do, since a call may run any of
-  them; the dispatcher forwards it unchanged.
+  them; the dispatcher forwards it unchanged. A member whose own code lets out nothing that a
+  caller observes (`Facts::plain_bodies`) has that signature only by a function that wraps its
+  code's value: its code is a function `<name>__plain` that returns the value plainly, and is
+  written as a method that does not throw (an exception there ends the program where it is
+  thrown, `java::throw_uncaught`), and the method's own function is `#[inline(always)] fn
+  <name>(..) -> Result<T, Throwable> { Ok(Self::<name>__plain(..)) }`. A call of the method
+  where the class of its object is known (a final class, a `super` call) calls
+  `<name>__plain` and tests nothing; the dispatcher's arm, and a call that a dispatcher among a
+  few classes makes, inline the wrapper, so its constant `Ok` folds away, while a large body stays
+  out of line and returns its value in registers. (The default methods of a closure's trait, which
+  can hold nothing but its methods, and methods of classes without objects, whose stub keeps
+  the method's signature, keep the `Result` in their code; `Gen::written_plain` decides it for
+  both the method and its direct calls.)
+
+  ```java
+  abstract class Shape { abstract int area(int scale); }
+  final class Square extends Shape { int area(int scale) { return side * side * scale; } }
+  final class Ripped extends Shape { int area(int scale) { if (scale > 2) throw new Torn(scale); return scale; } }
+  ```
+
+  ```rust
+  impl Square {
+      fn area__plain(&self, scale: i32) -> i32 { self.side.wrapping_mul(self.side).wrapping_mul(scale) }
+      #[inline(always)]
+      fn area(&self, scale: i32) -> Result<i32, Throwable> { Ok(Self::area__plain(self, scale)) }
+  }
+  // a call on a `Square`:   square.area__plain(r)
+  // a call on a `Shape`:    match Shape__area(s, r) { Ok(v) => v, Err(e) => return Err(e) }
+  ```
 - **Constructors** that throw something a caller catches return `Result<C, Throwable>`; `new`,
   `this(...)` and `super(...)` pass the failure on (a constructor that only calls `this(...)`
   returns that one's `Result`). A partly built object is dropped,
@@ -559,9 +587,8 @@ written in checked form exactly when it is in the analysis's set.
   method catches, plus what its `catch` and `finally` bodies raise.
 - **Observed** at a point: the classes under the enclosing `catch` types, from the innermost
   `try` out to one that catches `Throwable`, but for those a `try` catches by unwinding; everything, when an
-  enclosing `finally` observes (it does unless it only assigns variables, fields and array
-  elements with operations that cannot fail, which is invisible once the program ends); and what
-  the method's callers observe of what escapes it. Both are fixpoints, unioned over override
+  enclosing `finally` observes, whatever its statements are; and what the method's callers
+  observe of what escapes it. Both are fixpoints, unioned over override
   groups.
 - **Calls that raise nothing for their arguments** (`analysis/exceptions/guards.rs`): a call with
   known arguments (literals, constants, a static assigned once from a JVM native such as
@@ -588,7 +615,8 @@ written in checked form exactly when it is in the analysis's set.
   call unboxes from its local is the value that javac unboxes as it computes it. The locale's
   language that lowering passes to `toLowerCase(locale)` and `toUpperCase(locale)` is read after
   the check of the string, as the JDK's code reads it.
-- **Facts**: `throwing` (methods and constructors that return `Result`), `init_throwing`,
+- **Facts**: `throwing` (methods and constructors that return `Result`), `plain_bodies` (the
+  members of `throwing` that are there only for their override group), `init_throwing`,
   `live_tries`, `raising_tries`, `raising`, `null_checked`, `catching`, `raised_classes`,
   `unwinding_tries`, and the `NullPointerException` message facts below.
 

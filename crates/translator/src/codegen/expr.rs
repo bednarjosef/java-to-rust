@@ -563,41 +563,67 @@ impl<'a> Gen<'a> {
             }
             ExprKind::Call { args, resolved, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
+                let outer_plain = self.plain_call.take();
                 let code = match self.call_on_stack(e) {
                     Some(code) => code,
                     None => self.static_call(index, args),
                 };
+                self.plain_call = outer_plain;
                 self.raising(code, index)
             }
             ExprKind::MethodCall { receiver, args, resolved, is_super, .. } => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let code = if let Some(code) = self.call_on_stack(e) {
-                    code
-                } else if self.closure_type(receiver.ty).is_some() {
-                    self.closure_call(receiver, index, args)
-                } else if self.inlined(receiver, index) {
-                    self.inline_call(index, args)
-                } else if self.class.methods[index].is_static {
-                    self.static_call(index, args)
-                } else if !*is_super && let Some(t) = self.enum_of(receiver) {
-                    self.enum_call(t, e.pos, receiver, index, args)
-                } else {
-                    let target = self.dispatch(receiver, index, *is_super);
-                    if self.is_object_method(target) {
-                        return self.identity_call(receiver, target, args);
-                    }
-                    if self.runs_nowhere(receiver, target) {
-                        return self.no_object_runs(receiver, target, index);
-                    }
-                    self.method_call(receiver, target, args)
-                };
-                self.raising(code, index)
+                // The calls in the receiver and the arguments are written with their own names.
+                let outer_plain = self.plain_call.take();
+                let code = self.method_call_expr(e, receiver, args, index, *is_super);
+                self.plain_call = outer_plain;
+                code
             }
             ExprKind::ThisCall { .. } | ExprKind::SuperInit { .. } => {
                 unreachable!("lowering keeps `this(...)` and `super(...)` first in a constructor")
             }
             ExprKind::Builtin(builtin, args) => self.builtin(*builtin, args, e.ty, e.id),
         }
+    }
+
+    /// A method call, `receiver.m(args)` of method `index`, as `expr` writes it.
+    fn method_call_expr(
+        &mut self,
+        e: &'a Expr,
+        receiver: &'a Expr,
+        args: &'a [Expr],
+        index: usize,
+        is_super: bool,
+    ) -> Code {
+        let code = if let Some(code) = self.call_on_stack(e) {
+            code
+        } else if self.closure_type(receiver.ty).is_some() {
+            self.closure_call(receiver, index, args)
+        } else if self.inlined(receiver, index) {
+            self.inline_call(index, args)
+        } else if self.class.methods[index].is_static {
+            self.static_call(index, args)
+        } else if !is_super && let Some(t) = self.enum_of(receiver) {
+            self.enum_call(t, e.pos, receiver, index, args)
+        } else {
+            let target = self.dispatch(receiver, index, is_super);
+            if self.is_object_method(target) {
+                return self.identity_call(receiver, target, args);
+            }
+            if self.runs_nowhere(receiver, target) {
+                return self.no_object_runs(receiver, target, index);
+            }
+            // A plain body (`Facts::plain_bodies`) called directly gives its value as it
+            // is: there is no `Result` to test.
+            if self.written_plain(target) {
+                self.plain_call = Some(target);
+                let code = self.method_call(receiver, target, args);
+                self.plain_call = None;
+                return code;
+            }
+            self.method_call(receiver, target, args)
+        };
+        self.raising(code, index)
     }
 
     /// A call of method `target` (`index` as called) that no object runs (`Home::Nowhere`): the

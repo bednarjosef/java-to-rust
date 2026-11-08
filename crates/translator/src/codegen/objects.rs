@@ -1583,17 +1583,26 @@ impl<'a> Gen<'a> {
     /// The Rust path of a method or constructor, such as `Point__new` or `Point::norm`: a function
     /// of the module named after its struct (`module_fn`), or a function of the struct whose
     /// `impl` has it.
+    /// The name of method `index`'s function: that of its plain body where the call being
+    /// written is a direct call of one (`Gen::plain_call`, `Facts::plain_bodies`).
+    pub(super) fn called_name(&self, index: usize) -> String {
+        match self.plain_call == Some(index) {
+            true => format!("{}{}", self.fn_names[index], super::PLAIN_BODY),
+            false => self.fn_names[index].clone(),
+        }
+    }
+
     pub(super) fn qualified_fn(&self, index: usize) -> String {
         let owner = match self.homes[index] {
-            Home::Enum(t) if self.thin_fn(index) => return self.enum_fn(t, &self.fn_names[index]),
+            Home::Enum(t) if self.thin_fn(index) => return self.enum_fn(t, &self.called_name(index)),
             Home::Enum(t) => {
-                return format!("{}::{}", struct_name(&self.class.types[t].name), self.fn_names[index]);
+                return format!("{}::{}", struct_name(&self.class.types[t].name), self.called_name(index));
             }
             Home::Class(c) | Home::Fields(c) => c,
             Home::Free | Home::Nowhere => self.class.methods[index].class,
         };
         let between = if self.module_fn(index) { "__" } else { "::" };
-        format!("{}{between}{}", self.struct_of(owner), self.fn_names[index])
+        format!("{}{between}{}", self.struct_of(owner), self.called_name(index))
     }
 
     /// Whether method `index`, emitted on a struct, is a function of the struct's module rather
@@ -1936,7 +1945,7 @@ impl<'a> Gen<'a> {
             let args = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.fn_names[index]));
+            return Code::atom(format!("{obj}.{path}{}({args})", self.called_name(index)));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else {
@@ -1959,7 +1968,7 @@ impl<'a> Gen<'a> {
         let obj = self.object(receiver);
         let args = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index]);
+        let call = format!("{obj}{borrow}.{path}{}({args})", self.called_name(index));
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
     }
 
@@ -2003,7 +2012,7 @@ impl<'a> Gen<'a> {
         }
         self.guarded = outer;
         let path = self.method_path(receiver, index);
-        lines.push(format!("{obj}{borrow}.{path}{}({})", self.fn_names[index], bound.join(", ")));
+        lines.push(format!("{obj}{borrow}.{path}{}({})", self.called_name(index), bound.join(", ")));
         Code::atom(format!("{{ {} }}", lines.join(" ")))
     }
 

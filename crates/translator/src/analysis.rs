@@ -280,6 +280,10 @@ pub struct Facts {
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
     pub throwing: FastSet<usize>,
+    /// The methods of `throwing` that are there only for their override group: nothing that a
+    /// caller observes escapes their own code. Their code is a function that returns its value
+    /// plainly, and the function by the method's name wraps it in `Ok` (see `exceptions`).
+    pub plain_bodies: FastSet<usize>,
     /// The classes whose instance field initializers raise, so that their `field_inits` returns a
     /// `Result` (see `exceptions::field_inits`).
     pub init_throwing: FastSet<usize>,

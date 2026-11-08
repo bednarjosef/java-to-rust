@@ -2417,14 +2417,14 @@ impl<'a> Gen<'a> {
                 self.need(Need::Body(index));
                 let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(index, args).join(", ");
-                Some(Code::atom(self.enum_fn_call(d, &self.fn_names[index], &obj, &args)))
+                Some(Code::atom(self.enum_fn_call(d, &self.called_name(index), &obj, &args)))
             }
             Home::Fields(d) => {
                 let t = self.enum_of(receiver)?;
                 let root = self.fields_root(t).expect("a fields struct is at or above its subclasses");
                 let path = hierarchy::base_path(self.facts, self.class, root, d);
                 let borrow = self.enum_borrow(t, self.facts.mutating.contains(&index));
-                let name = self.fn_names[index].clone();
+                let name = self.called_name(index);
                 // The object is borrowed before the arguments run, so arguments that may reach an
                 // object of the class run first, as `bound_call` runs them.
                 let Type::Class(class, _) = receiver.ty else { unreachable!("a receiver has a class type") };
@@ -2461,7 +2461,7 @@ impl<'a> Gen<'a> {
                 }
                 let obj = self.object(receiver);
                 let args = self.call_args(index, args).join(", ");
-                Some(Code::atom(format!("{obj}{borrow}.{path}{}({args})", self.fn_names[index])))
+                Some(Code::atom(format!("{obj}{borrow}.{path}{}({args})", self.called_name(index))))
             }
             _ => None,
         }
