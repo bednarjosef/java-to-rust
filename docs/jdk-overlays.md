@@ -179,6 +179,7 @@ skipped. The error names the patch's file and line, and the JDK's file:
 | `jdk/internal/jimage/BasicImageReader.java` | reads the image's index and resources into arrays instead of mapping the file |
 | `jdk/internal/jrtfs/JrtFileAttributes.java`, `JrtFileSystem.java`, `SystemImage.java` | the `jrt:` file system without `%tc`, `CodeSource` and exploded images |
 | `jdk/internal/misc/UnsafeConstants.java` | the values the JVM injects: 8-byte little-endian addresses, unaligned access, 64-byte cache lines, the system's page size |
+| `java/lang/ThreadLocal.java` | each of the first 4,096 thread-locals gets a slot number, and each thread's map an array from those numbers to its table's entries, kept with the table, so that `get` and `set` index instead of hashing (docs/multi-threading.md, "Thread-locals by slot number") |
 | `jdk/internal/misc/CarrierThreadLocal.java`, `TerminatingThreadLocal.java` | thread-locals without the JVM's carrier threads and identity maps |
 | `jdk/internal/misc/Unsafe.java` | `allocateInstance` throws `InstantiationException`: for a class without objects as the JDK does, and for one with objects too, since a translation makes an object only by running a constructor |
 | `jdk/internal/misc/VM.java` | `getRuntimeArguments` answers an empty array: a translated program has no JVM arguments |

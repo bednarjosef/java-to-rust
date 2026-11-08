@@ -148,9 +148,12 @@ thread_local! {
     /// The program's `Thread` object of the thread, once `currentThread()` or the start of the
     /// thread has made it.
     static CURRENT: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
-    /// Where `CURRENT`'s object is, and its type, which `currentThread()` reads: two loads and a
-    /// compare, where `CURRENT` takes a borrow, a virtual call for the type and a release.
-    static CURRENT_AT: Cell<Option<(TypeId, *const ())>> = const { Cell::new(None) };
+    /// Where `CURRENT`'s object is, or null before it has one, which `currentThread()` reads
+    /// with `CURRENT_TYPE`: two loads and a compare, where `CURRENT` takes a borrow, a virtual
+    /// call for the type and a release.
+    static CURRENT_AT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
+    /// The type of `CURRENT_AT`'s object, or `NoThread`'s while there is none.
+    static CURRENT_TYPE: Cell<TypeId> = const { Cell::new(TypeId::of::<NoThread>()) };
     /// Whether the thread was started by the program, rather than being the main thread.
     static WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -203,7 +206,8 @@ pub fn start_thread(tid: i64, name: String, daemon: bool, body: impl FnOnce() + 
         WORKER.with(|w| w.set(true));
         RECORD.with_borrow_mut(|r| *r = Some(record.clone()));
         let outcome = std::panic::catch_unwind(AssertUnwindSafe(body));
-        CURRENT_AT.set(None);
+        CURRENT_TYPE.set(TypeId::of::<NoThread>());
+        CURRENT_AT.set(std::ptr::null());
         CURRENT.with_borrow_mut(|c| *c = None);
         if let Err(payload) = outcome
             && !payload.is::<Uncaught>()
@@ -551,26 +555,42 @@ pub fn rename_thread(tid: i64, name: &str) {
 /// asks `Thread.currentThread()`.
 #[inline]
 pub fn has_current_thread() -> bool {
-    CURRENT_AT.get().is_some()
+    !CURRENT_AT.get().is_null()
 }
 
-/// Makes `thread` the `Thread` object of the calling thread.
+/// The type of `CURRENT_TYPE` while a thread has no `Thread` object: private, so that no caller
+/// of `current_thread` can ask for it.
+struct NoThread;
+
+/// Makes `thread` the `Thread` object of the calling thread: once per thread, so cold, which
+/// keeps the making of the main thread's object out of the line of `currentThread()`.
+#[cold]
 pub fn set_current_thread<T: 'static>(thread: T) {
     let boxed = Box::new(thread);
     // The box does not move while `CURRENT` holds it, which is until the next `set` or the end
     // of the thread, where `CURRENT_AT` changes too.
-    CURRENT_AT.set(Some((TypeId::of::<T>(), &raw const *boxed as *const ())));
+    CURRENT_AT.set(&raw const *boxed as *const ());
+    CURRENT_TYPE.set(TypeId::of::<T>());
     CURRENT.with_borrow_mut(|c| *c = Some(boxed));
 }
 
-/// `Thread.currentThread()`, once `set_current_thread` has given the thread its object.
+/// `Thread.currentThread()`, once `set_current_thread` has given the thread its object: a compare
+/// of the object's type with `T`, a constant, and a load. The type is `NoThread`'s while there is
+/// no object, so the one compare also finds that the pointer is set.
 #[inline]
 pub fn current_thread<T: Clone + 'static>() -> T {
-    match CURRENT_AT.get() {
-        // SAFETY: the pointer is to the `T` that `CURRENT` holds (see `set_current_thread`).
-        Some((ty, at)) if ty == TypeId::of::<T>() => unsafe { (*(at as *const T)).clone() },
-        _ => panic!("the thread has its `Thread` object"),
+    if CURRENT_TYPE.get() != TypeId::of::<T>() {
+        no_current_thread()
     }
+    // SAFETY: `CURRENT_AT` points to the `T` that `CURRENT` holds whenever `CURRENT_TYPE` is
+    // `T`'s (see `set_current_thread`).
+    unsafe { (*(CURRENT_AT.get() as *const T)).clone() }
+}
+
+#[cold]
+#[inline(never)]
+fn no_current_thread() -> ! {
+    panic!("the thread has no `Thread` object of that type")
 }
 
 /// `LockSupport.park()`: waits until the calling thread's permit is given, and takes it, or until

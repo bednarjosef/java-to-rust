@@ -563,6 +563,19 @@ and the members a program uses are added to it. It holds `Thread`, `Thread.Uncau
   `terminatingThreadLocals`, in which the JDK's own `ThreadLocal` keeps a thread's values
   (`java/ThreadLocalStub.java` gives `Threads.java` the map's name); the scoped-value bindings
   and cache that `ScopedValue` keeps in the thread (a new thread inherits none).
+- **Thread-locals by slot number**: the JDK's `ThreadLocal` is patched
+  (`java/patches/java/lang/ThreadLocal.java`) so that `get` and `set` find a value without
+  hashing. Each of the first 4,096 thread-locals made gets a slot number of its own, never given
+  again, and each thread's map keeps an array from those numbers to the entries of its hash table,
+  next to the table. A `get` is then the current thread (a thread-local type compared and a
+  pointer read), its map, and an indexed load from the array: no hash, no probe and no test of the
+  entry's weak referent, which a live thread-local's entry cannot have lost. The table still decides what the map holds: an entry
+  goes into the array where it goes into the table and leaves it wherever it leaves the table
+  (`remove`, a stale entry expunged or replaced, a stale entry dropped as the table grows), so
+  `initialValue` runs once per thread, `remove` brings it back, values stay in their thread's map,
+  and the array keeps nothing alive that the table does not. Inheritance, a thread's exit and the
+  erasing of a pool thread's thread-locals replace or drop the whole map, array included.
+  Thread-locals made after the first 4,096 are found by hashing, as in the JDK.
 - **Inheritable thread locals**: as in Java, a new thread starts with a copy of its parent's
   `InheritableThreadLocal` values, each through `childValue`, run in the parent; a
   `ForkJoinWorkerThread` that asks not to inherit them gets none, and the application's class
@@ -592,7 +605,7 @@ group enumeration.
 | native | Rust (`crates/runtime/src/thread.rs` unless noted) |
 | --- | --- |
 | `start0(t, tid, name, daemon)` | `java::start_thread`: a `std::thread` with that name, which sets the current thread and calls `t.run()`; a daemon is not counted among the live threads |
-| `currentThread` | a thread-local current `Thread`, found through one thread-local pointer and its type (no borrow and no virtual call, for code that checks its owner thread on every call); the main thread's is made on first use |
+| `currentThread` | a thread-local current `Thread`, found through one thread-local pointer and its type, compared with the program's `Thread` type (no borrow and no virtual call, for code that checks its owner thread, or reads a thread-local, on every call); the main thread's is made on first use |
 | `alive0`, `state0` | the record's alive flag and state byte |
 | `join0(tid, millis)` | wait on the record's condition variable until it is not alive or the timeout passes, interruptible |
 | `interrupt0`, `isInterrupted0`, `clearInterrupt0` | the interrupt status (3.3) |
@@ -846,7 +859,7 @@ not depend on scheduling. `corpus/threads/` holds programs where each thread com
 own slot or object and `join` orders the output, or where the program checks its own invariant
 (every increment counted, every item consumed once) and prints the result. Programs that use the
 JDK's concurrency classes are in `corpus/whole-program/` (`AtomicNumbers`, `AtomicArrayDekker`,
-`ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadStates`,
+`ConcurrentCounters`, `ConcurrentMaps`, `ForkJoinTasks`, `ThreadLocals`, `ThreadLocalSlots`, `ThreadStates`,
 `ParkWithPermit`, `LockAmongValues`, `VarHandleViews`, `ByteBufferViews`, `StaticVarHandles`, `RunTimeHandles`, `ScopedValues`). Shape tests of the generated Rust are in
 `crates/translator/tests/thread_translation.rs`; among them, that a single-threaded program is
 unchanged and that a class no thread reaches has no monitor.
