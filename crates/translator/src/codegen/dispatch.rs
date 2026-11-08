@@ -1158,10 +1158,9 @@ impl<'a> Gen<'a> {
                 }
                 let tags = self.tags(&passing, &self.enum_variants(s));
                 let text = if nullable {
-                    format!(
-                        "{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))",
-                        self.object_place(value)
-                    )
+                    // Null has class number 0, which no class has: one test.
+                    let tag = self.runtime("Thin::tag_or_null");
+                    format!("matches!({tag}({}.as_ref().map(|o| o.0)), {tags})", self.object_place(value))
                 } else {
                     format!("matches!({}.0.tag(), {tags})", operand(&self.object(value)))
                 };

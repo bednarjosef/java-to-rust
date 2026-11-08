@@ -512,7 +512,8 @@ impl<'a> Gen<'a> {
         }
         let tags = self.tags(&[guard.class], &self.enum_variants(t));
         Some(if self.nullable(receiver) {
-            format!("{}.as_ref().is_some_and(|o| matches!(o.0.tag(), {tags}))", self.object_place(receiver))
+            let tag = self.runtime("Thin::tag_or_null");
+            format!("matches!({tag}({}.as_ref().map(|o| o.0)), {tags})", self.object_place(receiver))
         } else {
             format!("matches!({}.0.tag(), {tags})", super::dispatch::operand(&self.object(receiver)))
         })

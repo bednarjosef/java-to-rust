@@ -6733,6 +6733,30 @@ fn a_test_of_a_class_with_subclasses_is_one_range_of_class_numbers() {
 }
 
 #[test]
+fn a_test_of_a_value_that_may_be_null_is_one_test_of_the_class_number() {
+    // Null's class number is 0, which no class has, so the test of the number is the test for
+    // null too.
+    let rust = translate(
+        "abstract class Animal {}
+        class Dog extends Animal {}
+        class Cat extends Animal {}
+        class Main {
+            static Animal held;
+            static boolean dog() { return held instanceof Dog; }
+            public static void main(String[] args) {
+                System.out.println(dog());
+                held = new Dog();
+                System.out.println(dog());
+                held = new Cat();
+                System.out.println(dog());
+            }
+        }",
+    );
+    assert_contains(&rust, &["matches!(java::Thin::tag_or_null("]);
+    assert!(!rust.contains("is_some_and(|o| matches!(o.0.tag()"), "{rust}");
+}
+
+#[test]
 fn a_pattern_binds_the_object_with_if_let() {
     let rust = translate(PATTERNS);
     assert_contains(

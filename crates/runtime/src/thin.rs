@@ -9,6 +9,23 @@
 //! that holds the value. A class number is never 0, so a `Thin` is never 0, and `Option` of it
 //! uses 0 for `None`.
 //!
+//! `tag` reads the class number with one shift, and every test of a class (`matches!(o.0.tag(),
+//! 2..=5)`, the `match` of a dispatcher, a cast) compares the number with 32-bit immediates:
+//! `mov; shr $48; cmp $n; jne`, or a subtraction first for a range. The shift is written in
+//! assembly that reads no memory, which the optimizer still merges with another shift of the same
+//! bits and moves out of a loop, so a test that an earlier one decides is still dropped, but
+//! cannot see into: written as Rust, LLVM turned the shift and compare into a mask of the whole
+//! word and a compare with the class number shifted up, 64-bit constants that each take a 10-byte
+//! load, and after an earlier test narrowed the mask so far that the code generator no longer
+//! turned it back into a shift (on the Minecraft server, 80,000 tests as `and` with a mask, then
+//! a constant load and a compare, and 100,000 range tests that add a 64-bit constant). The costs:
+//! a test of a value that LLVM sees made with a known class is no longer folded (the translation
+//! makes such tests rarely, as its own facts already name the class there), and the inliner
+//! counts the shift as a call, so a function stops being inlined with somewhat fewer tests in it
+//! (in a probe, at 12 tests rather than 16).
+//! `tag_or_null` gives 0 for `None`, so that a test of a value that may be null is the same one
+//! compare.
+//!
 //! `to_pointer` gives back the handle with the class number cleared from its top bits, so a
 //! `java::Arc` is always the plain address and reading through one is a plain load: the
 //! translation clears the bits once, where it takes the handle out of the `Thin` at a class's
@@ -43,7 +60,15 @@ impl Thin {
     /// The number of the value's class.
     #[inline(always)]
     pub fn tag(self) -> u16 {
-        (self.0.get() >> 48) as u16
+        class_number(self.0.get())
+    }
+
+    /// The number of the class of `o`, or 0 for `None`, which no class has: a test of the number
+    /// is then also the test for null, with no branch of its own.
+    #[inline(always)]
+    pub fn tag_or_null(o: Option<Thin>) -> u16 {
+        // `None` is 0, so this is the value's bits.
+        class_number(o.map_or(0, |t| t.0.get()))
     }
 
     /// The address that the value holds: for a handle (`pointer`), its object's, which is
@@ -138,6 +163,31 @@ impl Thin {
     }
 }
 
+/// The top 16 bits of `bits`, by one shift that the optimizer cannot see into (see the module
+/// comment).
+#[inline(always)]
+fn class_number(bits: u64) -> u16 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut n = bits;
+        // A shift, which reads and writes no memory and leaves the flags.
+        unsafe {
+            std::arch::asm!("shr {n}, 48", n = inout(reg) n, options(pure, nomem, nostack, preserves_flags));
+        }
+        // Facts of the instruction, which the optimizer cannot see: what it leaves is below 2^16,
+        // so a compare reads the 32 bits that hold it with no zero-extension first; and it is at
+        // most the bits it shifted, so where the number is a class's (not 0), the bits are not
+        // 0 either, and the value is known not null.
+        unsafe { std::hint::assert_unchecked(n >> 16 == 0) };
+        unsafe { std::hint::assert_unchecked(n <= bits) };
+        n as u16
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        (bits >> 48) as u16
+    }
+}
+
 /// A value whose class number belongs to no class of its type: memory that the translation does
 /// not write was read as one.
 #[cold]
@@ -158,6 +208,17 @@ mod tests {
         let back: Arc<String> = unsafe { thin.to_pointer() };
         assert!(Arc::ptr_eq(&back, &text));
         assert_eq!(back.as_str(), "t");
+    }
+
+    #[test]
+    fn the_class_number_is_the_top_sixteen_bits_and_null_is_zero() {
+        for tag in [1, 2, 0x7b60, 0x8000, u16::MAX] {
+            let thin = Thin::value(tag, u32::MAX);
+            assert_eq!(thin.tag(), tag);
+            assert_eq!(Thin::tag_or_null(Some(thin)), tag);
+            assert_eq!(thin.ordinal(), -1);
+        }
+        assert_eq!(Thin::tag_or_null(None), 0);
     }
 
     #[test]
