@@ -258,18 +258,19 @@ fn an_array_field_only_its_constructor_makes_and_writes_is_frozen() {
 
 #[test]
 fn final_array_fields_that_threads_share_bound_their_indexes() {
-    // The constructor starts a thread, so `sections` is read from its cell at each use; it is
-    // final, so the array a read finds is the same at every later read, and the guard on its
-    // length proves the index.
+    // The constructor starts a thread before it writes `sections`, so `sections` is read from its
+    // cell at each use; it is final, so the array a read finds is the same at every later read,
+    // and the guard on its length proves the index.
     let rust = translate(
         "class A {
             private final int[] sections;
             private final Thread worker;
             A(int height) {
-                this.sections = new int[height];
-                this.worker = new Thread(() -> System.out.println(this.sections.length));
+                this.worker = new Thread(this::report);
                 this.worker.start();
+                this.sections = new int[height];
             }
+            void report() { System.out.println(this.worker == Thread.currentThread()); }
             synchronized int at(int y) {
                 if (y >= 0 && y < this.sections.length) {
                     return this.sections[y];
