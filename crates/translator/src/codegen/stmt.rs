@@ -22,6 +22,7 @@ impl<'a> Gen<'a> {
         let mut synchronized = false;
         let outer_steady = self.steady.take();
         let known = self.known_init.len();
+        let mut slot_reads = Vec::new();
         for (i, stmt) in stmts[..end].iter().enumerate() {
             let rest = &stmts[i + 1..];
             // The block of a `synchronized` that `synchronized_block` wrote with its lock.
@@ -60,7 +61,7 @@ impl<'a> Gen<'a> {
                     let site = self.declared_site(stmt);
                     self.stmt(stmt, rest);
                     if let Some(site) = site {
-                        self.bind_slot_fields(stmt, site, rest);
+                        slot_reads.extend(self.bind_slot_fields(stmt, site, rest));
                     }
                     // The statements after it run only once it completes normally.
                     let method = self.method;
@@ -70,6 +71,11 @@ impl<'a> Gen<'a> {
             }
         }
         self.known_init.truncate(known);
+        // The reads that read a stack object's fields from locals of this block read them no
+        // more: the same code may be written again, in another function, with no such locals.
+        for id in slot_reads {
+            self.loop_fields.remove(&id);
+        }
         if folded {
             self.steady = Some(strings::SteadyOf::new(&stmts[end], Some(&stmts[end + 1])));
             self.tail_local(&stmts[end]);

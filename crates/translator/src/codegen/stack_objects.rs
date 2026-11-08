@@ -476,7 +476,8 @@ impl<'a> Gen<'a> {
     /// primitive fields of the object that the statements after it in its block, `rest`, read
     /// (`v.f`, or a call of a getter, `v.getF()`, whose body for the object's class is
     /// `return this.f;`) from the slot into locals, `let v_f = *unsafe { slot_1.object() }.f.fixed();`,
-    /// and has those reads read the locals instead.
+    /// and has those reads read the locals instead. Gives back the reads, which the caller
+    /// forgets after the block.
     ///
     /// A field read so is the value of the field at every read that takes it. Until the variable
     /// is used for anything but such reads (`Use::Other`), nothing but the variable names the
@@ -488,16 +489,21 @@ impl<'a> Gen<'a> {
     /// nothing is taken from the slot.) The local takes the field where the compiler still sees
     /// the slot's stores, which it forwards to it: the field is not stored and read back through
     /// a handle whose address, masked of its class number, it cannot follow.
-    pub(super) fn bind_slot_fields(&mut self, stmt: &'a Stmt, site: &'a Expr, rest: &'a [Stmt]) {
-        let Stmt::Local { name: var, .. } = stmt else { return };
-        let Some((slot, c)) = self.slots.get(&site.id).cloned() else { return };
+    pub(super) fn bind_slot_fields(
+        &mut self,
+        stmt: &'a Stmt,
+        site: &'a Expr,
+        rest: &'a [Stmt],
+    ) -> Vec<ExprId> {
+        let Stmt::Local { name: var, .. } = stmt else { return Vec::new() };
+        let Some((slot, c)) = self.slots.get(&site.id).cloned() else { return Vec::new() };
         if !self.filled.contains(&site.id) || !self.locals.contains_key(var.as_str()) {
-            return;
+            return Vec::new();
         }
         let name = &self.class.types[c].name;
         let celled = self.celled(name);
         if !celled && !self.facts.immutable.contains(name) {
-            return;
+            return Vec::new();
         }
         let mut scan = Scan { var, class: c, uses: Vec::new(), loops: Vec::new(), next_loop: 0 };
         for s in rest {
@@ -511,6 +517,7 @@ impl<'a> Gen<'a> {
             .flat_map(|u| u.1.iter().copied())
             .collect();
         let mut bound: Vec<(usize, &'a str, String)> = Vec::new();
+        let mut reads = Vec::new();
         for (u, loops) in &scan.uses[..first_other] {
             let Use::Read(read, owner, field) = *u else { continue };
             // The struct that declares the field holds cells as the object's does.
@@ -546,7 +553,9 @@ impl<'a> Gen<'a> {
                 }
             };
             self.loop_fields.insert(read.id, local);
+            reads.push(read.id);
         }
+        reads
     }
 
     /// The uses of the variable of `scan` in `stmt`, in the order of the code, with the loops
