@@ -6,10 +6,12 @@
 //! A field starts as Java's `null` unless something sets it first. An object field is not null
 //! when every constructor sets it, among the assignments that become the constructor's struct
 //! literal (see `leading_assignments`) or by its initializer, to a value that is not null, and no
-//! other assignment stores a value that may be null. A static field needs a non-null initializer
-//! that runs on first use (see `statics`).
+//! other assignment stores a value that may be null. One that every constructor sets later, but
+//! before anything can read it, is an `Option` that reads never find empty (`assigned_fields`).
+//! A static field needs a non-null initializer that runs on first use (see `statics`).
 
 use super::FastSet;
+use super::assigned_fields;
 use super::{Facts, leading_assignments};
 use crate::ast::*;
 
@@ -26,11 +28,14 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     // are recorded as nullable for every method of the group.
     let mut nullable_groups: FastSet<(usize, usize)> = FastSet::default();
     let mut nullable_group_returns: FastSet<usize> = FastSet::default();
+    let narrowed = assigned_fields::narrowed_stores(class);
+    let quiet_superclasses = assigned_fields::quiet_superclasses(class);
     loop {
         let before = (
             facts.nullable_vars.len(),
             facts.nullable_returns.len(),
             facts.nullable_fields.len(),
+            facts.assigned_fields.len(),
             facts.nullable_statics.len(),
             facts.placeholder_statics.len(),
             facts.nullable_elements.len(),
@@ -41,6 +46,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
         let mut declared = Vec::new();
         let mut returns = Vec::new();
         let mut fields = Vec::new();
+        let mut assigned = Vec::new();
         let mut statics = Vec::new();
         let mut placeholders = Vec::new();
         let mut on_expr = |m: usize, e: &Expr| {
@@ -52,7 +58,12 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
                         Place::Var(name) => vars.push((m, name.clone())),
                         Place::Field { object, name } => {
                             if let Some(owner) = class.field_owner_name(object.ty, name) {
-                                fields.push((owner.to_string(), name.clone()));
+                                // A variable that a null test proves not null here is an
+                                // `Option` all the same, which the field's cell holds.
+                                match narrowed.contains(&x.id) {
+                                    true => assigned.push((owner.to_string(), name.clone())),
+                                    false => fields.push((owner.to_string(), name.clone())),
+                                }
                             }
                         }
                         Place::Static { class, name } => statics.push((*class, name.clone())),
@@ -166,9 +177,33 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             }
         }
         for (t, decl) in class.types.iter().enumerate() {
-            for f in decl.fields.iter().filter(|f| may_be_unset(f.ty) || starts_null_enum(facts, f)) {
-                if !set_by_construction(class, facts, &ctors[t], t, &f.name) {
-                    fields.push((decl.name.clone(), f.name.clone()));
+            for (i, f) in decl.fields.iter().enumerate() {
+                let key = (decl.name.clone(), f.name.clone());
+                // The collector clears a reference's referent, outside the program's code.
+                if decl.name == "java.lang.ref.Reference" && f.name == "referent" {
+                    fields.push(key);
+                    continue;
+                }
+                if !(may_be_unset(f.ty) || starts_null_enum(facts, f))
+                    || set_by_construction(class, facts, &ctors[t], t, &f.name)
+                {
+                    continue;
+                }
+                // Facts only grow: a field found nullable stays so.
+                if facts.nullable_fields.contains(&key) {
+                    continue;
+                }
+                match assigned_fields::assigned_before_read(
+                    class,
+                    facts,
+                    &ctors[t],
+                    t,
+                    i,
+                    &narrowed,
+                    &quiet_superclasses,
+                ) {
+                    true => assigned.push(key),
+                    false => fields.push(key),
                 }
             }
             for f in decl.statics.iter().filter(|f| may_be_unset(f.ty) || matches!(f.ty, Type::Enum(_))) {
@@ -208,6 +243,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             }
         }
         facts.nullable_fields.extend(fields);
+        facts.assigned_fields.extend(assigned);
         facts.nullable_statics.extend(statics);
         facts.placeholder_statics.extend(placeholders);
         facts.nullable_elements.extend(elements);
@@ -215,6 +251,7 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             facts.nullable_vars.len(),
             facts.nullable_returns.len(),
             facts.nullable_fields.len(),
+            facts.assigned_fields.len(),
             facts.nullable_statics.len(),
             facts.placeholder_statics.len(),
             facts.nullable_elements.len(),
@@ -227,6 +264,9 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     // initializer: its cell is an `Option` that is read as it is.
     let nullable = facts.nullable_statics.clone();
     facts.placeholder_statics.retain(|key| !nullable.contains(key));
+    // A field that may be set to null is an `Option` read as one.
+    let nullable = &facts.nullable_fields;
+    facts.assigned_fields.retain(|key| !nullable.contains(key));
 }
 
 /// The element types of references of the array classes that are `Object`s, which

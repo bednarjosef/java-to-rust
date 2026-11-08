@@ -25,6 +25,37 @@ fn null_pointer_thrown(message: &str) -> ! {
     crate::throw("java.lang.NullPointerException", message)
 }
 
+/// The value of a field that every constructor of its object sets, to a value that is not null,
+/// before anything can read it (`analysis/assigned_fields.rs`): its cell starts empty, as there is
+/// no object to start it with, and holds a value by the time any code reads it. The read keeps
+/// one test, with its failure out of line (`unset_field`): it builds no `NullPointerException`
+/// and returns no `Result`, and an analysis that is wrong stops the program rather than letting
+/// it run on.
+#[inline(always)]
+pub fn assigned<T>(value: Option<T>) -> T {
+    match value {
+        Some(value) => value,
+        None => unset_field(),
+    }
+}
+
+/// `assigned` of a field read where it is.
+#[inline(always)]
+pub fn assigned_ref<T>(value: &Option<T>) -> &T {
+    match value {
+        Some(value) => value,
+        None => unset_field(),
+    }
+}
+
+/// The end of the program where a read of a field of `assigned` found it empty: the analysis was
+/// wrong.
+#[cold]
+#[inline(never)]
+pub fn unset_field() -> ! {
+    panic!("a field read before its constructor set it, which the analysis ruled out")
+}
+
 /// `non_null` where the program observes the `NullPointerException`, without a message: where
 /// nothing reads it, or where Java's has none (as `Objects.requireNonNull`'s).
 #[inline]

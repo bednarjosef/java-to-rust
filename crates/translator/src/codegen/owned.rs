@@ -120,7 +120,7 @@ impl<'a> Gen<'a> {
             while taken.contains(&temp) {
                 temp.push('_');
             }
-            let nullable = g.field_nullable(&decl.name, &f.name);
+            let nullable = g.field_optional(&decl.name, &f.name);
             if !nullable && (f.ty.is_numeric() || f.ty == Type::Boolean) {
                 // A number's type cannot come from the literal it starts as.
                 let code = g.value(value, f.ty);
@@ -233,9 +233,9 @@ impl<'a> Gen<'a> {
                     let value = match (&bound[i], values[i]) {
                         (Some(local), _) => local.clone(),
                         (None, Some(e)) => {
-                            self.field_value(e, f.ty, self.field_nullable(&decl.name, &f.name))
+                            self.field_value(e, f.ty, self.field_optional(&decl.name, &f.name))
                         }
-                        (None, None) => self.placeholder(f.ty, self.field_nullable(&decl.name, &f.name)),
+                        (None, None) => self.placeholder(f.ty, self.field_optional(&decl.name, &f.name)),
                     };
                     let value = self.field_cell(m.class, f, value);
                     if value == field { field } else { format!("{field}: {value}") }

@@ -477,6 +477,7 @@ fn lower_into<'t>(
         proxy_classes: (0..lowering.types.len()).filter(|&t| lowering.is_proxy_class(t)).collect(),
         receivers: Default::default(),
         reflection_table: lowering.reflection_table(),
+        construction_methods: Default::default(),
     };
     Ok((class, lowering.real.clone(), failed))
 }

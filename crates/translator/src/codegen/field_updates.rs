@@ -22,7 +22,7 @@ impl<'a> Gen<'a> {
             return None;
         }
         let ty = read.ty;
-        let nullable = self.facts.field_nullable(object.ty, field);
+        let nullable = self.facts.field_optional(object.ty, field);
         let cell = self.field_ty_name(ty, nullable);
         // A method that returns the old value returns it as the cell holds it.
         if !matches!(update, FieldUpdate::CompareAndSet) && self.ret_text(index) != format!(" -> {cell}") {

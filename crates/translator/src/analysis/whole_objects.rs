@@ -198,6 +198,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
         let mut inline = Some(inits);
         if let Some(f) = shared {
             class.methods[f].body = inline.take().unwrap_or_default();
+            class.construction_methods.insert(f, false);
         }
         for &m in &ctors {
             // A constructor of a leaf that never runs keeps its body, which codegen writes as
@@ -224,6 +225,7 @@ pub fn whole_objects_all(class: &mut Class) -> Result<(), Vec<Error>> {
             };
             if whole.contains(&t) {
                 rewrite.construct(class, m, own);
+                class.construction_methods.insert(m, true);
             } else {
                 rewrite.leaf(class, m, own, &sources[&m]);
             }

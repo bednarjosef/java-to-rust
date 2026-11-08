@@ -51,6 +51,12 @@ impl<'a> Gen<'a> {
             .into_iter()
             .map(|(name, ty)| {
                 let value = self.field_read(object, &name, ty).text;
+                // A field that reads never find empty (`Facts::assigned_fields`) is read as its
+                // value, and its copy's cell is an `Option` all the same.
+                let value = match self.facts.field_assigned(object.ty, &name) {
+                    true => format!("Some({value})"),
+                    false => value,
+                };
                 (name, value)
             })
             .collect();
