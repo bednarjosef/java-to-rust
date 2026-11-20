@@ -331,9 +331,13 @@ pub struct Facts {
     /// The functional interfaces whose values are closures, `Rc<dyn Fn(A) -> R>` (see
     /// `closures`).
     pub closure_types: FastSet<usize>,
-    /// The locals, by method and name, that hold a closure only to call it: a plain Rust
-    /// closure, `let f = |x| ..;` (see `closures::closure_locals`).
+    /// The locals, by method and name, that hold a closure only to call it or lend it: a plain
+    /// Rust closure, `let f = |x| ..;` (see `closures::closure_locals`).
     pub closure_locals: FastSet<(usize, String)>,
+    /// The closure parameters, as (method, parameter) indexes, that the method only calls and
+    /// lends on: `&dyn Fn(..)`, or `Option<&dyn Fn(..)>` where they may be null, which the
+    /// caller lends (see `closures::lent_closures`).
+    pub lent_closures: FastSet<(usize, usize)>,
     /// The `new`s and calls of factories whose objects never leave the method that creates
     /// them and, in a loop, can no longer be reached when the next iteration makes the next one:
     /// their objects may live in a slot on the method's stack (see `escape`). Empty when the
@@ -406,15 +410,11 @@ pub struct Represented {
 /// The facts that the analyses find before their first check.
 fn represented(class: &Class) -> Represented {
     use crate::timings::phase;
-    let mut facts = phase("analysis: structs", || {
-        let mut facts = Facts {
-            fields_structs: hierarchy::fields_structs(class),
-            field_owners: hierarchy::field_owners(class),
-            closure_types: closures::closure_types(class),
-            ..Facts::default()
-        };
-        facts.closure_locals = closures::closure_locals(class, &facts.closure_types);
-        facts
+    let mut facts = phase("analysis: structs", || Facts {
+        fields_structs: hierarchy::fields_structs(class),
+        field_owners: hierarchy::field_owners(class),
+        closure_types: closures::closure_types(class),
+        ..Facts::default()
     });
     phase("analysis: representation", || representation(class, &mut facts));
     Represented { facts, ranges: None }
@@ -627,6 +627,11 @@ fn analyze_with(
                     borrowed_params(class, &mut facts);
                     (facts.borrowed_objects, facts.borrowed_optional_objects) =
                         borrowed_objects(class, &facts);
+                    let borrowed =
+                        facts.borrowed_objects.union(&facts.borrowed_optional_objects).copied().collect();
+                    facts.lent_closures = closures::lent_closures(class, &facts.closure_types, &borrowed);
+                    facts.closure_locals =
+                        closures::closure_locals(class, &facts.closure_types, &facts.lent_closures);
                 })
             });
             (facts, ranges, borrowing, ascii_length)

@@ -12,6 +12,11 @@
 //! { let k = k; Rc::new(move |x: i32| -> i32 { x + k }) as IntOp }
 //! ```
 //!
+//! A parameter that the method only calls and lends on (`Facts::lent_closures`) is a
+//! `&dyn Fn(..)` instead, and a lambda passed to it is the closure itself on the caller's stack,
+//! `&(|x: i32| -> i32 { x + k })`, which borrows its captures as a local closure does: no `Rc`
+//! is made or dropped. A stored closure passed to it lends what its handle holds.
+//!
 //! In a program with threads, a closure type that a thread can reach (`Facts::thread_shared`)
 //! is `std::sync::Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `std::sync::Arc::new(..)`:
 //! what they capture is of types that threads share, by the same walk. Objects that threads share
@@ -104,6 +109,75 @@ impl<'a> Gen<'a> {
         self.gap();
         self.line(&format!("{}type {name} = {ty};", self.vis()));
         self.closure_trait(t, &name);
+    }
+
+    /// `dyn Fn(i32, i32) -> i32`: the closures of closure type `t` as a lent parameter takes them
+    /// (`Facts::lent_closures`), with no bounds, as the closure runs on the thread that lends it.
+    pub(super) fn closure_fn(&mut self, t: usize) -> String {
+        let m = self.closure_method(t);
+        let saved = self.set_aside();
+        self.enter_method(m);
+        let params: Vec<String> = self
+            .typed_params(m, false)
+            .iter()
+            .map(|p| p.split_once(": ").map_or(p.as_str(), |(_, ty)| ty).to_string())
+            .collect();
+        let ret = self.ret_text(m);
+        self.restore(saved);
+        format!("dyn Fn({}){ret}", params.join(", "))
+    }
+
+    /// The argument `e` of a lent closure parameter of type `ty` (`Facts::lent_closures`), an
+    /// `Option` of it where the parameter may be null (`optional`): a lambda is the closure
+    /// itself, made on the stack, that borrows the locals it captures where it can; a lent
+    /// parameter or a local closure is passed as it is; any other closure is a borrow of its
+    /// handle.
+    pub(super) fn lent_closure(&mut self, e: &'a Expr, ty: Type, optional: bool) -> String {
+        let some = |text: String| if optional { format!("Some({text})") } else { text };
+        let inner = self.peel(e);
+        if let ExprKind::Cast(to, lambda) = &inner.kind
+            && let ExprKind::New { args, ctor: Some(ctor), .. } = &lambda.kind
+            && let Some(t) = self.closure_type(*to)
+        {
+            let (prelude, closure) = self.closure_parts(t, *ctor, args, true);
+            if prelude.is_empty() {
+                return some(format!("&({closure})"));
+            }
+            return some(format!("&{{ {} {closure} }}", prelude.join(" ")));
+        }
+        match &inner.kind {
+            ExprKind::Null => return "None".to_string(),
+            ExprKind::Var(name) if self.lent_param(name) => {
+                let (index, i) = self.param_key(name).expect("a parameter");
+                let lent_optional = self.facts.borrowed_optional_objects.contains(&(index, i));
+                return match (lent_optional, optional) {
+                    (false, _) => some(self.local(name)),
+                    (true, true) => self.local(name),
+                    // Null throws here.
+                    (true, false) => self.object(inner),
+                };
+            }
+            ExprKind::Var(name) if self.facts.closure_locals.contains(&(self.method, name.clone())) => {
+                return some(format!("&{}", self.local(name)));
+            }
+            _ => {}
+        }
+        if optional {
+            format!("({}).as_deref()", self.optional_object_ref(e, ty))
+        } else {
+            format!("&**({})", self.object_ref(e))
+        }
+    }
+
+    /// The (method, parameter) indexes of the parameter `name` of the method being written.
+    fn param_key(&self, name: &str) -> Option<(usize, usize)> {
+        let method = self.class.methods.get(self.method)?;
+        Some((self.method, method.params.iter().position(|p| p.name == name)?))
+    }
+
+    /// Whether `name` is a lent closure parameter of the method being written.
+    fn lent_param(&self, name: &str) -> bool {
+        self.param_key(name).is_some_and(|key| self.facts.lent_closures.contains(&key))
     }
 
     /// The default methods of closure type `t` (named `name`) that the program calls, as an

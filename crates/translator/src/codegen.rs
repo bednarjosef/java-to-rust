@@ -1332,13 +1332,25 @@ impl<'a> Gen<'a> {
     /// The parameters of method `index` with their Rust types. For the method's own body
     /// (`body`), a parameter that it assigns is `mut` and one that it ignores is `_x`.
     fn typed_params(&mut self, index: usize, body: bool) -> Vec<String> {
+        // A closure that the method only calls is a `&dyn Fn(..)` that the caller lends.
+        let lent: Vec<Option<String>> = (0..self.class.methods[index].params.len())
+            .map(|i| {
+                let ty = self.class.methods[index].params[i].ty;
+                let t = self.closure_type(ty).filter(|_| self.facts.lent_closures.contains(&(index, i)))?;
+                let f = self.closure_fn(t);
+                let optional = self.facts.borrowed_optional_objects.contains(&(index, i));
+                Some(if optional { format!("Option<&{f}>") } else { format!("&{f}") })
+            })
+            .collect();
         let m = &self.class.methods[index];
         m.params
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 let mutable = if body && assigns_any(&m.body, &p.name) { "mut " } else { "" };
-                let ty = if self.borrowed_optional.contains(&p.name)
+                let ty = if let Some(lent) = &lent[i] {
+                    lent.clone()
+                } else if self.borrowed_optional.contains(&p.name)
                     && self.facts.lent_strings.contains(&(index, i))
                 {
                     "Option<java::Str<'_>>".to_string()

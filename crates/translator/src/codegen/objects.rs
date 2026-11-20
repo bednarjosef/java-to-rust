@@ -1254,7 +1254,7 @@ impl<'a> Gen<'a> {
 
     /// A possibly-null object as the `&Option<Rc<..>>` that a parameter of type `ty` borrows: the
     /// place that holds it when it is one of that type, or else a reference to its value.
-    fn optional_object_ref(&mut self, e: &'a Expr, ty: Type) -> String {
+    pub(super) fn optional_object_ref(&mut self, e: &'a Expr, ty: Type) -> String {
         let inner = self.peel(e);
         if matches!(inner.kind, ExprKind::Null) {
             return "&None".to_string();
@@ -1485,6 +1485,9 @@ impl<'a> Gen<'a> {
                     self.str_arg(a)
                 } else if self.facts.borrowed_params.contains(&(index, i)) {
                     self.str_ref(a)
+                } else if self.facts.lent_closures.contains(&(index, i)) {
+                    let optional = self.facts.borrowed_optional_objects.contains(&(index, i));
+                    self.lent_closure(a, p.ty, optional)
                 } else if self.facts.borrowed_objects.contains(&(index, i)) {
                     self.object_ref(a)
                 } else if self.facts.borrowed_optional_objects.contains(&(index, i)) {
