@@ -805,6 +805,23 @@ fn an_object_compared_with_an_object_value_is_compared_by_address_without_a_clon
 }
 
 #[test]
+fn a_record_compares_a_component_of_an_identity_class_by_address() {
+    // `K` keeps `Object`'s `equals`, so `k.equals(that.k)` in the record's `equals` is `k ==
+    // that.k`: the addresses, without `that.k` made an `Object` first.
+    let rust = translate(
+        "class K { }
+        record T(K k, int n) {}
+        class A { public static void main(String[] a) {
+            K k = new K();
+            Object o = new T(k, 1);
+            System.out.println(new T(k, 1).equals(o) + \" \" + new T(new K(), 1).equals(o) + \" \" + new T(null, 1).equals(new T(null, 1)));
+        } }",
+    );
+    assert_contains(&rust, &["std::ptr::addr_eq("]);
+    assert_lacks(&rust, &[".map(Object::K)"]);
+}
+
+#[test]
 fn to_string_is_a_method_that_printing_and_concatenation_call() {
     let rust = translate(
         "class P { int x; public String toString() { return \"P\" + x; } }

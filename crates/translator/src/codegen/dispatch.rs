@@ -3750,6 +3750,23 @@ impl<'a> Gen<'a> {
         if self.class.methods[r].name == "hashCode" {
             return Code::atom(format!("{}({address})", self.runtime("address_hash")));
         }
+        // An argument that is an object of the receiver's class, made an `Object`: its address,
+        // without making it a value of the enum (a record's identity component, `c.equals(that.c)`).
+        if let ExprKind::Cast(_, inner) = &args[0].kind {
+            let inner = self.peel(inner);
+            if self.enum_of(inner).is_none() && self.struct_class(inner) == Some(c) {
+                let temp = self.temp("address");
+                let test = if self.nullable(inner) {
+                    let place = self.object_place(inner);
+                    let other = self.address(c, "b");
+                    format!("{}.as_ref().is_some_and(|b| std::ptr::addr_eq({temp}, {other}))", operand(&place))
+                } else {
+                    let handle = self.object_ref(inner);
+                    format!("std::ptr::addr_eq({temp}, {})", self.address(c, &handle))
+                };
+                return Code::atom(format!("{{ let {temp} = {address}; {test} }}"));
+            }
+        }
         let arg = self.call_args(r, args).remove(0);
         let p = &self.class.methods[r].params[0];
         let optional = self.optional_var(r, p.ty, &p.name);
