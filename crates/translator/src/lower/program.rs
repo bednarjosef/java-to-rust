@@ -485,6 +485,7 @@ fn lower_into<'t>(
         erased_casts: lowering.erased_casts.take(),
         proxy_classes: (0..lowering.types.len()).filter(|&t| lowering.is_proxy_class(t)).collect(),
         receivers: Default::default(),
+        tested: Default::default(),
         reflection_table: lowering.reflection_table(),
         construction_methods: Default::default(),
     };

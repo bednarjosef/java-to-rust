@@ -195,6 +195,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             erased_casts: lowering.erased_casts.take(),
             proxy_classes: Default::default(),
             receivers: Default::default(),
+            tested: Default::default(),
             reflection_table: lowering.reflection_layout.take(),
             construction_methods: Default::default(),
         };

@@ -2209,6 +2209,76 @@ fn a_call_whose_receiver_is_of_one_class_runs_its_method_with_no_test() {
 }
 
 #[test]
+fn a_cast_or_an_instanceof_tests_only_the_classes_its_value_may_be() {
+    let rust = translate_whole(
+        "tested-values",
+        "public class Main {
+            interface Shape { int area(); }
+            static class Base { }
+            static final class Square extends Base implements Shape { public int area() { return 4; } }
+            static final class Plain extends Base { }
+            static final class Circle extends Base implements Shape { public int area() { return 3; } }
+            static Object held, spare = new Circle();
+            static Base round, flat;
+            public static void main(String[] args) {
+                Base[] bases = { new Square(), new Plain(), new Circle() };
+                System.out.println(spare.hashCode() == 0);
+                Base shaped = args.length > 0 ? new Circle() : new Square();
+                held = args.length > 1 ? new Plain() : new Square();
+                round = args.length > 2 ? new Circle() : new Square();
+                flat = new Plain();
+                int sum = ((Shape) shaped).area();
+                if (shaped instanceof Shape) sum++;
+                for (Base b : bases) if (b instanceof Shape s) sum += s.area();
+                if (held instanceof Shape) sum++;
+                sum += ((Shape) held).area();
+                if (round instanceof Shape) sum++;
+                if (flat instanceof Shape) sum--;
+                try { sum += ((Shape) flat).area(); } catch (ClassCastException e) { sum += 100; }
+                System.out.println(sum);
+            }
+        }",
+    );
+    // `Shape`'s classes are two runs of class numbers, apart from `Plain`'s.
+    let numbers = rust.find("fn as_shape").expect("a test of `Shape`'s classes");
+    let numbers = &rust[numbers..rust[numbers..].find("\n    }").unwrap() + numbers];
+    assert!(numbers.contains("3 | 5 => Some(MainShape(self.0)),"), "{numbers}");
+    // `shaped` is a square or a circle: the cast tests nothing, and the test is true.
+    assert_contains(
+        &rust,
+        &[
+            "MainShape__area(MainShape(java::cast(&shaped, |o| { debug_assert!(o.as_shape().is_some()); \
+             Some(MainShape(o.0)) }, &(\"Main$Shape\", java::APP)).0))",
+            "if true {\n        sum += 1;",
+        ],
+    );
+    // `held` is a square or a plain object (or anything the runtime makes), where an `Object`
+    // may also be a circle: the cast and the test compare one number, not both of `Shape`'s.
+    assert_contains(
+        &rust,
+        &[
+            "java::cast(o, |o| { let passes = matches!(o.0.tag(), 3); \
+             debug_assert_eq!(passes, o.as_shape().is_some()); passes.then(|| MainShape(o.0)) }",
+            "{ let tag = java::Thin::tag_or_null(MAIN_HELD.cloned().as_ref().map(|o| o.0)); \
+             let passes = matches!(tag, 3); debug_assert_eq!(passes, matches!(tag, 3 | 5)); passes }",
+        ],
+    );
+    assert_lacks(&rust, &["java::cast(o, Object::as_shape,"]);
+    // `round` is a square or a circle and `flat` a plain object: the tests are null tests, the
+    // one true and the other false, and the cast of `flat` fails for any object.
+    assert_contains(
+        &rust,
+        &[
+            "MAIN_ROUND.cloned().as_ref().is_some_and(|o| { debug_assert!(matches!(o.0.tag(), 3 | 5)); true })",
+            "MAIN_FLAT.cloned().as_ref().is_some_and(|o| { debug_assert!(!matches!(o.0.tag(), 3 | 5)); false })",
+            "|o| { debug_assert!(o.as_shape().is_none()); None::<MainShape> }",
+        ],
+    );
+    // `bases` holds every class: the test is the type's own.
+    assert_contains(&rust, &["b.as_shape()"]);
+}
+
+#[test]
 fn packages_become_nested_modules() {
     let rust = translate_project("imports", "com.example.app.Main");
     assert_contains(

@@ -416,6 +416,17 @@ fn narrow(
             })
             .collect()
     });
+    class.tested = crate::timings::phase("live methods: tested values", || {
+        live.tested
+            .iter()
+            .filter(|(_, flow)| !flow.any)
+            .map(|(&id, flow)| {
+                let list: Vec<usize> = flow.classes.iter().collect();
+                let list = lists.entry(list).or_insert_with_key(|list| list.as_slice().into()).clone();
+                (id, list)
+            })
+            .collect()
+    });
     let watched_runs = watched.iter().any(|&(ty, method)| live.runs(ty, method));
     crate::timings::phase("live methods: prune", || analysis::live_methods::prune(class, &live));
     Some((running, live.unresolved, watched_runs))

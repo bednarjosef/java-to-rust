@@ -80,6 +80,10 @@ pub struct LiveMethods {
     /// The classes whose objects the receiver of each instance call that can run may be, over
     /// every object of every class that runs the calling method (`Class::receivers`).
     pub receivers: FastMap<ExprId, ClassSet>,
+    /// What the value of each cast to a class and each `instanceof` test of a class in code that
+    /// can run may be, over every object of every class that runs the method, by the value's id
+    /// (`Class::tested`).
+    pub tested: FastMap<ExprId, Flow>,
     /// The points-to facts that the walk followed, kept where the program looks members up
     /// (`ReflectionTable::entries`): a census checks with them that the reflection table has
     /// the classes that the lookups get and cuts the table by them (`live_methods_of_pruned`),
@@ -229,6 +233,7 @@ fn walk(
                 unresolved: Vec::new(),
                 thread_statics: None,
                 receivers: FastMap::default(),
+                tested: FastMap::default(),
                 facts: None,
             },
             built: FastSet::default(),
@@ -308,6 +313,11 @@ fn check(fast: &Result<Option<LiveMethods>, String>, slow: &Result<Option<LiveMe
         || fast.receivers.iter().any(|(x, a)| slow.receivers.get(x).map(classes) != Some(classes(a)))
     {
         differ("receivers");
+    }
+    if fast.tested.len() != slow.tested.len()
+        || fast.tested.iter().any(|(x, a)| slow.tested.get(x) != Some(a))
+    {
+        differ("tested values");
     }
     eprintln!(
         "live check: the same {} methods, {} classes with objects and {} receivers",
@@ -488,6 +498,7 @@ impl Walk<'_> {
                     unresolved: Vec::new(),
                     thread_statics: None,
                     receivers: FastMap::default(),
+                    tested: FastMap::default(),
                     facts: None,
                 },
                 built: FastSet::default(),
@@ -698,6 +709,9 @@ struct Memos {
     /// handing them again hands the runtime nothing new.
     handed: FastSet<(usize, ExprId, usize)>,
     thrown: FastSet<(usize, ExprId, usize)>,
+    /// The casts and `instanceof` tests whose value is in `LiveMethods::tested`, each with the
+    /// object it runs on: what the value may be does not change from one walk to the next.
+    tested: FastSet<(ExprId, usize)>,
 }
 
 /// What a call passed the methods it runs (`Walk::call`): what was known of the argument at
@@ -1018,6 +1032,20 @@ impl Walk<'_> {
                 }
             }
             _ => {}
+        }
+        // What the value of a cast or a test of a class may be, which may let the code generator
+        // test fewer classes (`Class::tested`).
+        if let ExprKind::Cast(Type::Class(..), value)
+        | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } = &x.kind
+            && matches!(value.ty, Type::Class(..))
+            && (!self.fast || self.memos.borrow_mut().tested.insert((x.id, ctx)))
+        {
+            // The first flow is kept as it is, sharing its sets' words with the facts'.
+            let flow = self.values.eval(self.class, m, ctx, value);
+            match self.state.borrow_mut().live.tested.entry(value.id) {
+                std::collections::hash_map::Entry::Occupied(mut kept) => _ = kept.get_mut().join(&flow),
+                std::collections::hash_map::Entry::Vacant(place) => _ = place.insert(flow),
+            }
         }
         // An enum's objects are its constants, which its static initialization makes.
         if let Type::Enum(name) | Type::Class(name, _) = x.ty
