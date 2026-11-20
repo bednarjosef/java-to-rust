@@ -10,10 +10,12 @@
 //! - `toString()` is `"Point[x=" + x + ", y=" + y + "]"`, with the record's simple name;
 //! - `hashCode()` is `31 * h + hash(c)` over the components, starting at 0, with each component's
 //!   own hash (`Double.hashCode(d)`, `Objects.hashCode(o)` for a reference);
-//! - `equals(Object o)` is `this == o || o instanceof Point that && y == that.y && x == that.x`,
-//!   testing the components from the last to the first, as `ObjectMethods` nests its tests, and
-//!   comparing floating components with `Double.compare(a, b) == 0` and references with
-//!   `Objects.equals`;
+//! - `equals(Object o)` is `o instanceof Point that && y == that.y && x == that.x`, testing the
+//!   components from the last to the first, as `ObjectMethods` nests its tests, and comparing
+//!   floating components with `Double.compare(a, b) == 0` and references with `Objects.equals`.
+//!   `ObjectMethods` tests `this == o` first; that decides only where a component's own `equals`
+//!   would run on itself (below), so only then is it written, as elsewhere it would keep the
+//!   identity of records that are otherwise plain values;
 //! - a reference component whose type is a class of the program outside `java.lang` and the
 //!   charsets (which are the runtime's values), in a program that uses `Object`, is hashed and
 //!   compared through its own type instead, as `ObjectMethods` does it: `(c == null ? 0 :
@@ -784,7 +786,8 @@ impl Pos {
         acc.unwrap_or_else(|| self.int(0))
     }
 
-    /// `this == other || other instanceof Point that && y == that.y && x == that.x`.
+    /// `other instanceof Point that && y == that.y && x == that.x`, after `this == other ||` where a
+    /// component is compared through its own type.
     fn equals_test(&self, this_type: &str, components: &[Component], survey: &Survey) -> Value {
         let owner = "equals(java.lang.Object)";
         let other = self.node(
@@ -792,8 +795,12 @@ impl Pos {
             json!({"name": "other", "javaType": "java.lang.Object",
                    "symbol": {"kind": "PARAMETER", "name": "other", "owner": owner, "static": false, "type": "java.lang.Object"}}),
         );
-        let this = self.node("IDENTIFIER", json!({"name": "this", "javaType": this_type}));
-        let same_object = self.binary("EQUAL_TO", "boolean", this, other.clone());
+        let same_object = self.binary(
+            "EQUAL_TO",
+            "boolean",
+            self.node("IDENTIFIER", json!({"name": "this", "javaType": this_type})),
+            other.clone(),
+        );
         let that_symbol = json!({"kind": "BINDING_VARIABLE", "name": "that", "owner": owner, "static": false, "type": this_type});
         let variable = self.node(
             "VARIABLE",
@@ -843,6 +850,12 @@ impl Pos {
                 ),
             };
             test = self.binary("CONDITIONAL_AND", "boolean", test, same);
+        }
+        // `this == other` decides only where a component's own `equals` would run on itself:
+        // `Objects.equals` tests identity first and the other tests are reflexive. Elsewhere it is
+        // left out, as it would keep the identity of records that are otherwise plain values.
+        if !components.iter().any(|c| survey.own_methods(&c.ty)) {
+            return test;
         }
         self.binary("CONDITIONAL_OR", "boolean", same_object, test)
     }
