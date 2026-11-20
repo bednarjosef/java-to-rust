@@ -399,6 +399,9 @@ struct Heap {
     /// Whether each full collection also reports the bytes alive per slot size
     /// (`JAVA_GC_LOG=2`).
     log_sizes: bool,
+    /// The bytes of roots the last collection scanned and the nanoseconds the scans took, before
+    /// what they reach is marked: of the statics, the thread-locals and the stacks (`JAVA_GC_LOG`).
+    roots: [(usize, u64); 3],
 }
 
 struct Shared(UnsafeCell<Heap>);
@@ -440,6 +443,7 @@ static HEAP: Shared = Shared(UnsafeCell::new(Heap {
     stack_pages: true,
     low_first: false,
     log_sizes: false,
+    roots: [(0, 0); 3],
 }));
 
 /// The heap's lock: a spin lock that yields, since it is taken rarely and briefly, and must not
@@ -2134,6 +2138,11 @@ static POOL: Pool = Pool {
 static MARKERS: AtomicUsize = AtomicUsize::new(1);
 static IDLE: AtomicUsize = AtomicUsize::new(0);
 
+/// With `JAVA_GC_LOG`: the nanoseconds the markers of the current collection spent without work,
+/// from the first time each ran out until marking ended or it took more (`Marker::finish`).
+static LOG_IDLE: AtomicBool = AtomicBool::new(false);
+static IDLE_NANOS: AtomicU64 = AtomicU64::new(0);
+
 /// Counts up whenever a marker puts work in the pool and when marking ends: an idle marker that
 /// has spun `IDLE_SPINS` times and yielded `IDLE_YIELDS` times sleeps on it until it changes.
 /// Spinning on, idle helpers took 6 s of processor time in a run of 0.64 s that marked a long
@@ -2540,26 +2549,36 @@ impl Marker {
         n > 0
     }
 
-    /// Marks until every marker is out of work.
+    /// Marks until every marker is out of work. With `JAVA_GC_LOG`, adds the time this marker
+    /// had no work to `IDLE_NANOS`.
     fn finish(&mut self) {
         let markers = MARKERS.load(Ordering::Acquire);
+        let log = LOG_IDLE.load(Ordering::Relaxed);
         loop {
             self.drain();
             if self.take() {
                 continue;
             }
             IDLE.fetch_add(1, Ordering::SeqCst);
+            let idle_from = log.then(std::time::Instant::now);
+            let idle_end = || {
+                if let Some(from) = idle_from {
+                    IDLE_NANOS.fetch_add(from.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+            };
             let mut spins = 0u32;
             loop {
                 if POOL.len.load(Ordering::Acquire) > 0 {
                     // Not idle while taking, so that nobody sees every marker idle meanwhile.
                     IDLE.fetch_sub(1, Ordering::SeqCst);
                     if self.take() {
+                        idle_end();
                         break;
                     }
                     IDLE.fetch_add(1, Ordering::SeqCst);
                 }
                 if IDLE.load(Ordering::SeqCst) == markers {
+                    idle_end();
                     // The markers asleep see the end as they wake.
                     if self.shares {
                         WORK.fetch_add(1, Ordering::SeqCst);
@@ -2881,6 +2900,8 @@ fn mark_and_sweep(
     let helpers = if shares { HELPERS.load(Ordering::Acquire) } else { 0 };
     MARKERS.store(helpers + 1, Ordering::Release);
     IDLE.store(0, Ordering::Release);
+    IDLE_NANOS.store(0, Ordering::Relaxed);
+    LOG_IDLE.store(h.log, Ordering::Relaxed);
     META.store(h.meta, Ordering::Release);
     if helpers > 0 {
         MARK_DONE.store(0, Ordering::Release);
@@ -2918,9 +2939,21 @@ fn mark_and_sweep(
             minor = false;
         }
     }
+    let log = h.log;
+    let mut roots = [(0usize, 0u64); 3];
+    // Scans a root with `scan`, counting its bytes and time in `roots[kind]` when logging.
+    let mut timed = |kind: usize, bytes: usize, scan: &mut dyn FnMut()| {
+        if !log {
+            return scan();
+        }
+        let at = std::time::Instant::now();
+        scan();
+        roots[kind].0 += bytes;
+        roots[kind].1 += at.elapsed().as_nanos() as u64;
+    };
     let statics = statics();
     for &(from, to) in &statics.ranges[..statics.count] {
-        marker.range(from, to);
+        timed(0, to - from, &mut || marker.range(from, to));
         marker.drain();
     }
     let tls = statics.tls.0.next_multiple_of(statics.tls.1);
@@ -2938,16 +2971,19 @@ fn mark_and_sweep(
         }
         let tp = if i == me { thread_pointer() } else { t.thread_pointer.get() };
         if tls > 0 && tp != 0 {
-            marker.root_range(tp - tls, tp);
+            timed(1, tls, &mut || marker.root_range(tp - tls, tp));
             marker.drain();
         }
         if i == me {
-            scan_own_stack(&mut marker, own, t.stack_top.get());
+            let top = t.stack_top.get();
+            timed(2, top.saturating_sub(own.from()), &mut || scan_own_stack(&mut marker, own, top));
         } else if t.stopped_sp.get() != 0 {
-            marker.root_range(t.stopped_sp.get(), t.stack_top.get());
+            let (sp, top) = (t.stopped_sp.get(), t.stack_top.get());
+            timed(2, top.saturating_sub(sp), &mut || marker.root_range(sp, top));
         }
         marker.drain();
     }
+    heap(g).roots = roots;
     marker.finish();
     loop {
         let done = MARK_DONE.load(Ordering::Acquire);
@@ -3300,12 +3336,17 @@ fn span_counts() -> (u64, u64, u64) {
 fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time::Duration) {
     use std::io::Write;
     let (spans, locked, slots) = span_counts();
-    let mut buffer = [0u8; 256];
+    let mut buffer = [0u8; 512];
     let mut out = &mut buffer[..];
+    let [statics, locals, stacks] = h.roots;
+    let markers = MARKERS.load(Ordering::Relaxed);
+    let idle =
+        IDLE_NANOS.load(Ordering::Relaxed) as u128 * 100 / (marked.as_nanos() * markers as u128).max(1);
     let _ = writeln!(
         out,
         "[gc {} {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms, scale {}%, \
-         spans {} ({} locked) of {:.1} slots]",
+         spans {} ({} locked) of {:.1} slots, roots: statics {} KB {} us, thread-locals {} KB {} us, \
+         stacks {} KB {} us, {} markers idle {}% of the marking]",
         h.collections,
         if h.minor { "minor" } else { "full" },
         taken >> 20,
@@ -3317,8 +3358,16 @@ fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time:
         spans,
         locked,
         slots as f64 / spans.max(1) as f64,
+        statics.0 >> 10,
+        statics.1 / 1000,
+        locals.0 >> 10,
+        locals.1 / 1000,
+        stacks.0 >> 10,
+        stacks.1 / 1000,
+        markers,
+        idle,
     );
-    let len = 256 - out.len();
+    let len = 512 - out.len();
     unsafe { write(2, buffer.as_ptr().cast(), len) };
 }
 
