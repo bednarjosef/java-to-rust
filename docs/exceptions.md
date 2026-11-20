@@ -364,7 +364,9 @@ one could, `Gen::may_fail` picks the checked form, chosen by the same facts the 
 
 - **A checked form of its own** (`Facts::raising`): `java::try_div`, `try_rem`, `try_get`,
   `try_put`, `try_modify`, `try_char_at`, `try_substring`, the `try_parse_*` family, `try_cast`
-  for a downcast, the plain-array helpers (`try_at`, `try_row`, `try_row_mut`, `try_assign`, ...)
+  for a downcast, `Class::try_check_cast` for `Class.cast` (which `StateHolder.getValue` runs on
+  every block state property read of the Minecraft server, inside a `try` of a caller), the
+  plain-array helpers (`try_at`, `try_row`, `try_row_mut`, `try_assign`, ...)
   and others in `crates/runtime`. An element update whose value may fail (`counts[i] += 10 / d`)
   is a read, the value and a write in Java's order instead of a closure. A sliced loop in a `try`
   keeps its fast copy: the check before it proves its accesses, and the other copy fails where

@@ -908,9 +908,8 @@ impl<'a> Gen<'a> {
             Builtin::GetClass => self.get_class(&args[0]),
             Builtin::ClassLiteral(ty) => Code::borrow_or_atom(self.type_class(ty)),
             Builtin::ClassMethod(op) => self.class_method(op, args),
-            Builtin::ClassIsInstance | Builtin::ClassCheck => {
-                self.class_instance(builtin == Builtin::ClassCheck, args)
-            }
+            Builtin::ClassIsInstance => self.class_instance(None, args),
+            Builtin::ClassCheck => self.class_instance(Some(id), args),
             Builtin::ComparableClassFor => self.comparable_class_for(&args[0]),
             Builtin::ClassLiteralName { class, simple } => Code::atom(format!(
                 "java::JString::from({})",

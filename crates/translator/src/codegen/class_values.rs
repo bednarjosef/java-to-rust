@@ -704,12 +704,22 @@ impl<'a> Gen<'a> {
         )
     }
 
-    /// `ClassIsInstance(class, x)`, or with `check` the statement `ClassCheck(class, x)`: the
-    /// runtime's test of the binary names of the classes and interfaces of `x`'s class
-    /// (`instance_names`) against the class's, or of the class numbers where `x`'s value has one.
-    /// A null class throws in the checked form where a `catch` may see it (`dereference`).
-    pub(super) fn class_instance(&mut self, check: bool, args: &'a [Expr]) -> Code {
-        let method = if check { "check_cast" } else { "is_instance" };
+    /// `ClassIsInstance(class, x)`, or with `check` the statement `ClassCheck(class, x)` that is
+    /// the expression `check`: the runtime's test of the binary names of the classes and
+    /// interfaces of `x`'s class (`instance_names`) against the class's, or of the class numbers
+    /// where `x`'s value has one. A null class throws in the checked form where a `catch` may see
+    /// it (`dereference`), and so does a failed check (`try_check_cast`, `Facts::raising`).
+    pub(super) fn class_instance(&mut self, check: Option<ExprId>, args: &'a [Expr]) -> Code {
+        let raising = check.is_some_and(|id| self.facts.raising.contains(&id));
+        let method = match check {
+            Some(_) if raising => "try_check_cast",
+            Some(_) => "check_cast",
+            None => "is_instance",
+        };
+        let passed_on = |g: &mut Self, code: Code| match raising {
+            true => Code::atom(g.passed_on(code)),
+            false => code,
+        };
         // A value of an enum of classes that is not a variable, such as an array's element, is
         // evaluated once, after the class and before a null class throws, as in Java, and both
         // its number and its names are read from it.
@@ -725,13 +735,14 @@ impl<'a> Gen<'a> {
             let class = self.expr(&args[0]).text;
             self.need(Need::RuntimeTypeNames(t));
             let value = self.enum_option(x);
-            return Code::new(
+            let code = Code::new(
                 format!(
                     "match ({class}, {value}) {{ (class_, object_) => {checked}.{method}_numbered(object_.map(|o| \
                      o.0.tag()), || object_.map(|o| o.runtime_type_names())) }}"
                 ),
                 LOWEST,
             );
+            return passed_on(self, code);
         }
         let class = if self.nullable(&args[0]) {
             let option = self.expr(&args[0]).text;
@@ -740,10 +751,11 @@ impl<'a> Gen<'a> {
             self.expr(&args[0]).at(ATOM)
         };
         let names = self.instance_names(x);
-        match self.instance_number(x) {
+        let code = match self.instance_number(x) {
             Some(number) => Code::atom(format!("{class}.{method}_numbered({number}, || {names})")),
             None => Code::atom(format!("{class}.{method}({names})")),
-        }
+        };
+        passed_on(self, code)
     }
 
     /// The class number of the value of `x`, as an `Option<u16>` that is `None` when `x` is null,
