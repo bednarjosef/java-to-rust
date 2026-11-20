@@ -91,6 +91,13 @@ impl<T> Arc<T> {
         Arc { ptr: unsafe { NonNull::new_unchecked(address as *mut T) }, owns: PhantomData }
     }
 
+    /// The handle of an object that a `static` holds for the whole run (`StaticObject`), outside
+    /// the heap, as an object in a `Slot` is.
+    #[inline(always)]
+    pub(crate) fn of_static(value: &'static T) -> Arc<T> {
+        Arc { ptr: NonNull::from(value), owns: PhantomData }
+    }
+
     /// Whether `a` and `b` are handles of the same object (Java's `==`).
     #[inline]
     pub fn ptr_eq(a: &Arc<T>, b: &Arc<T>) -> bool {

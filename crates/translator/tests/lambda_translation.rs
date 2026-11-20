@@ -46,8 +46,8 @@ fn a_lambda_is_a_variant_of_its_interface() {
             "fn apply(&self, a: i32, b: i32) -> i32 {\n        a + b\n    }",
             "OpLambdaInMain(Arc<OpLambdaInMain>) = 3,",
             "3 => { let o: &Arc<OpLambdaInMain> = &unsafe { this.0.to_pointer() }; o.apply(a, b) }",
-            "AOp::OpLambdaInMain({ static LAMBDA: java::PlaceObject<Arc<OpLambdaInMain>> = java::PlaceObject::new(); \
-             LAMBDA.get(|| Arc::new(OpLambdaInMain__new())) })",
+            "AOp::OpLambdaInMain({ static LAMBDA: java::StaticObject<OpLambdaInMain> = \
+             java::StaticObject::new(OpLambdaInMain {}); LAMBDA.handle() })",
         ],
     );
 }
