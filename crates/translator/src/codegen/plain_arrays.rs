@@ -137,8 +137,8 @@ impl<'a> Gen<'a> {
                 && matches!(&a.kind, ExprKind::Var(name)
                     if self.plain(name).is_none() && !self.is_borrowed(&self.local(name)))
         });
-        let args = self.call_args(index, args).join(", ");
-        let call = format!("{}{}({args})", self.static_fn(index), self.entry_suffix(index));
+        let texts = self.call_args(index, args).join(", ");
+        let call = format!("{}{}({texts})", self.static_fn(index), self.entry_suffix(index, args));
         if lends && self.class.methods[index].ret != Type::Void {
             return Code::atom(format!("{{ let value = {call}; value }}"));
         }

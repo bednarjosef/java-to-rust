@@ -1480,14 +1480,26 @@ impl<'a> Gen<'a> {
     }
 
     /// The arguments of a call of method `index`: borrowed parameters get borrows, optional ones
-    /// `Option`s, and others values.
+    /// `Option`s, and others values. An argument runs after the ones before it, so a class that
+    /// one of those surely initialized needs no check in it (`after_operand`).
     pub(super) fn call_args(&mut self, index: usize, args: &'a [Expr]) -> Vec<String> {
+        self.call_args_in(index, args, true)
+    }
+
+    /// `call_args`, for a caller that may run an argument's code before an earlier one's
+    /// (`in_order` false: `bind_params` computes some values before binding any): then no
+    /// argument counts on what the ones before it initialized.
+    pub(super) fn call_args_in(&mut self, index: usize, args: &'a [Expr], in_order: bool) -> Vec<String> {
         let params = &self.class.methods[index].params;
+        let known = self.known_init.len();
         let texts: Vec<String> = args
             .iter()
             .zip(params)
             .enumerate()
             .map(|(i, (a, p))| {
+                if let Some(before) = i.checked_sub(1).filter(|_| in_order) {
+                    self.after_operand(&args[before]);
+                }
                 if self.facts.borrowed_params.contains(&(index, i))
                     && self.facts.lent_strings.contains(&(index, i))
                 {
@@ -1523,6 +1535,7 @@ impl<'a> Gen<'a> {
                 }
             })
             .collect();
+        self.known_init.truncate(known);
         // A local that a later argument assigns (`casStack(p, p = p.next)`) is passed as a copy
         // of its value then, which Java passes: a borrow of the local itself would outlive the
         // assignment.
@@ -1924,9 +1937,10 @@ impl<'a> Gen<'a> {
         // Java initializes the class when `new` runs, before the arguments, which may see what
         // the initialization does; the constructor initializes it again, which does nothing.
         let init = self.init_call(self.class.methods[ctor].class).filter(|_| args.iter().any(sees_statics));
-        let args = self.call_args(ctor, args).join(", ");
+        let texts = self.call_args(ctor, args).join(", ");
         self.entry_call(id, ctor);
-        let path = self.qualified_fn(ctor) + self.entry_suffix(ctor);
+        let path = self.qualified_fn(ctor) + self.entry_suffix(ctor, args);
+        let args = texts;
         let path = match path.rsplit_once("::") {
             Some((owner, name)) if !turbofish.is_empty() => format!("{owner}{turbofish}::{name}"),
             _ => path,
@@ -2771,9 +2785,10 @@ impl<'a> Gen<'a> {
         let mutable = initialize || uses_this(rest);
         match delegate {
             Some((args, index)) => {
-                let args = self.call_args(index, args).join(", ");
+                let texts = self.call_args(index, args).join(", ");
                 // The constructor's own class is initialized: this one runs in it.
-                let path = self.qualified_fn(index) + self.entry_suffix(index);
+                let path = self.qualified_fn(index) + self.entry_suffix(index, args);
+                let args = texts;
                 let call = match self.on_stack {
                     true if args.is_empty() => format!("{path}_on_stack({})", self.slot_param),
                     true => format!("{path}_on_stack({}, {args})", self.slot_param),
@@ -2864,9 +2879,10 @@ impl<'a> Gen<'a> {
         };
         match (hierarchy::embedded(self.facts, self.class, t), resolved) {
             (Some(_), Some(ctor)) => {
-                let args = self.call_args(*ctor, args).join(", ");
+                let texts = self.call_args(*ctor, args).join(", ");
                 // The superclass is initialized: its subclass, whose constructor runs, is.
-                let path = self.qualified_fn(*ctor) + self.entry_suffix(*ctor);
+                let path = self.qualified_fn(*ctor) + self.entry_suffix(*ctor, args);
+                let args = texts;
                 let call = Code::atom(format!("{path}({args})"));
                 (Some(self.raising(call, *ctor).text), rest)
             }

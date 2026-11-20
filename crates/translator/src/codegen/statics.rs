@@ -537,7 +537,9 @@ impl<'a> Gen<'a> {
     /// The class whose initialization a use of class `class` runs here (`init_call`), if any:
     /// none in that class or a subclass of it, nor after a statement of the same method that
     /// surely ran it or the initialization of a subclass of it (`known_init`, `implies`), nor
-    /// for a class that `main` initializes first (`Facts::initialized_first`).
+    /// after an operand of the same expression that surely ran it before this code runs
+    /// (`after_operand`), nor for a class that `main` initializes first
+    /// (`Facts::initialized_first`).
     pub(super) fn uninitialized(&self, class: usize) -> Option<usize> {
         let current = self.class.methods[self.method].class;
         let init = self.facts.init_class(self.class, class)?;
@@ -584,12 +586,44 @@ impl<'a> Gen<'a> {
             && self.facts.init_class(self.class, m.class).is_some()
     }
 
-    /// What a call of static method or constructor `index` written here adds to its function's
-    /// name: `INITIALIZED`, calling the code without the check, where the method is split
-    /// (`split_entry`) and its class is known to be initialized here; else nothing.
-    pub(super) fn entry_suffix(&self, index: usize) -> &'static str {
+    /// What a call of static method or constructor `index` with arguments `args` written here
+    /// adds to its function's name: `INITIALIZED`, calling the code without the check, where the
+    /// method is split (`split_entry`) and its class is known to be initialized here, or by an
+    /// argument, which runs before the call; else nothing.
+    pub(super) fn entry_suffix(&self, index: usize, args: &[Expr]) -> &'static str {
         let class = self.class.methods[index].class;
-        if self.split_entry(index) && self.uninitialized(class).is_none() { INITIALIZED } else { "" }
+        let known = || match self.uninitialized(class) {
+            None => true,
+            Some(init) => {
+                let mut found = Vec::new();
+                args.iter().for_each(|a| self.surely_initializes(a, &mut found));
+                found.into_iter().any(|known| self.implies(known, init))
+            }
+        };
+        if self.split_entry(index) && known() { INITIALIZED } else { "" }
+    }
+
+    /// Marks the classes that operand `done` surely initialized, once it completed normally, as
+    /// known to be initialized (`known_init`), for the operands written after it that run only
+    /// after it (`surely_initializes`): the later arguments of a call (`call_args`) and the right
+    /// operand of a binary operator. Rust runs a call's arguments and an operator's operands in
+    /// the order they are written, which is Java's. The caller forgets them (`truncate`) once it
+    /// has written those operands, as the code around it may run before `done`.
+    pub(super) fn after_operand(&mut self, done: &Expr) {
+        let mut found = Vec::new();
+        self.surely_initializes(done, &mut found);
+        let method = self.method;
+        self.known_init.extend(found.into_iter().map(|c| (method, c)));
+    }
+
+    /// `write(self)`, which writes code as lines ahead of the statement being written (a
+    /// native's arguments computed into temporaries first, `hoisted_ints`): that code runs before
+    /// the operands written ahead of it as well, so it is written knowing no class initialized.
+    pub(super) fn ahead_of_statement<T>(&mut self, write: impl FnOnce(&mut Self) -> T) -> T {
+        let known = std::mem::take(&mut self.known_init);
+        let written = write(self);
+        self.known_init = known;
+        written
     }
 
     /// The classes whose initialization statement `stmt` has run once it completes normally,

@@ -469,10 +469,16 @@ its enum constants, or a call or `new` of one of its static methods or construct
 with the check, which the statement evaluates whatever path it takes (not past `&&`, `||` or
 `?`, nor in a lambda). That statement's block and the blocks inside it skip the check: once one
 check passed, the class is initialized or this thread is running its initialization, so a
-second one would pass too. A check of a class stands for those of the classes its
-initialization initializes first, its superclasses and those superinterfaces (`implies`): once
-it has started, theirs have run or are running on this thread. A lambda's body checks again, as
-it may run on another thread.
+second one would pass too. So do the operands of an expression that run after one that surely
+initialized it (`after_operand`): a call's later arguments and the call itself, and an operator's
+right operand, which Rust runs in the order they are written, as Java does, so that
+`getChunk(SectionPos.blockToSectionCoord(pos.getX()), SectionPos.blockToSectionCoord(pos.getZ()))`
+checks `SectionPos` once. Not the arguments of a call that is inlined, which its body may bind in
+another order, nor code written as lines ahead of the statement, such as a native's arguments
+computed into temporaries (`ahead_of_statement`). A check of a class stands for those of the classes
+its initialization initializes first, its superclasses and those superinterfaces (`implies`): once
+it has started, theirs have run or are running on this thread. A lambda's body checks again, as it
+may run on another thread.
 
 Where the class is known to be initialized, the check that starts a static method or
 constructor is left out too. Such a method is two functions (`split_entry`): the one of its name,

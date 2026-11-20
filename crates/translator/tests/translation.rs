@@ -2899,8 +2899,9 @@ fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
             static int once(int v) { return v * 3; }
         }
         public class A {
+            static int three() { return Pos.once(2); }
             public static void main(String[] args) {
-                System.out.println(new Pos(1).next().x + Pos.once(2));
+                System.out.println(new Pos(1).next().x + three());
             }
         }",
     );
@@ -2910,7 +2911,8 @@ fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
             // Pos's constructor is called with its check (from A) and without (from Pos's own
             // code): two functions.
             "fn Pos__new(x: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x)\n}",
-            // Nothing calls `once` without its check: one function, which runs the check.
+            // Nothing calls `once` without its check (`three` calls it where nothing has checked
+            // Pos): one function, which runs the check.
             "fn once(v: i32) -> i32 {\n    init_pos();\n",
             // Only `super(..)` calls Vec's constructor, without its check.
             "Pos { base: Vec_Fields__new__initialized(x) }",
@@ -2918,6 +2920,48 @@ fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
     );
     // The split that stays keeps no trace of the marker that found it.
     assert_lacks(&rust, &["once__initialized", "fn Vec_Fields__new(", "entry_check"]);
+}
+
+#[test]
+fn a_class_checked_by_an_earlier_operand_is_not_checked_again() {
+    let rust = translate(
+        "class Sec {
+            static int shift;
+            static { shift = 4; System.out.println(\"sec\"); }
+            static int toSection(int v) { return v >> shift; }
+            static long pack(int x, int z) { return ((long) x << 32) | z; }
+        }
+        class Gate {
+            static { System.out.println(\"gate\"); }
+            static boolean open(int v) { return v > 2; }
+        }
+        public class A {
+            static long key(int x, int z) { return Sec.pack(Sec.toSection(x), Sec.toSection(z)); }
+            static int sum(int x, int z) { return Sec.toSection(x) + Sec.toSection(z); }
+            static boolean gates(int x) { return (x > 100 && Gate.open(x)) | Gate.open(x + 1); }
+            static boolean both(int x) { return Gate.open(x) && Gate.open(x - 1); }
+            static int choose(boolean b, int x) { return (b ? Sec.toSection(x) : 0) + Sec.toSection(x); }
+            public static void main(String[] args) {
+                System.out.println(key(16, 32) + sum(1, 2) + choose(false, 3));
+                System.out.println(gates(1) + \" \" + both(3));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A later argument, and the call itself, run after the first argument checked Sec.
+            "pack__initialized(to_section(x), to_section__initialized(z))",
+            // The right operand runs after the left one.
+            "to_section(x) + to_section__initialized(z)",
+            // Past `&&`, the right operand runs only once the left one has.
+            "open(x) && open__initialized(x - 1)",
+            // What runs only past `&&`, or in one branch of `?:`, may not run: the operand after
+            // it checks.
+            "(x > 100 && open(x)) | open(x + 1)",
+            "(if b { to_section(x) } else { 0 }) + to_section(x)",
+        ],
+    );
 }
 
 #[test]

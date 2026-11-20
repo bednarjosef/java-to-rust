@@ -187,16 +187,19 @@ impl<'a> Gen<'a> {
 
     /// The int arguments at `at`, in Java's order. Each one that is not a constant goes into a
     /// temporary first: the array borrow taken by the call must not overlap the evaluation of a
-    /// later argument that reads the array.
+    /// later argument that reads the array. They run ahead of the statement
+    /// (`ahead_of_statement`).
     pub(super) fn hoisted_ints<const N: usize>(&mut self, args: &'a [Expr], at: [usize; N]) -> [String; N] {
-        at.map(|i| {
-            let code = self.value(&args[i], Type::Int);
-            if code.literal.is_some() {
-                return code.text;
-            }
-            let temp = self.temp(&format!("arg{i}"));
-            self.line(&format!("let {temp} = {};", code.text));
-            temp
+        self.ahead_of_statement(|g| {
+            at.map(|i| {
+                let code = g.value(&args[i], Type::Int);
+                if code.literal.is_some() {
+                    return code.text;
+                }
+                let temp = g.temp(&format!("arg{i}"));
+                g.line(&format!("let {temp} = {};", code.text));
+                temp
+            })
         })
     }
 

@@ -1030,9 +1030,10 @@ struct Gen<'a> {
     /// (`early_null_exit`).
     after_body: &'a [Expr],
     /// The classes whose initialization the statements written before the current one in its
-    /// block, or in a block around it, surely ran (`initialized_by`), as `(method, class)`: a use
-    /// of one of them needs no check (`uninitialized`). Each block forgets what its statements
-    /// added as it ends, and a closure's body starts with none.
+    /// block, or in a block around it, surely ran (`initialized_by`), or an operand that runs
+    /// before the code being written (`after_operand`), as `(method, class)`: a use of one of them
+    /// needs no check (`uninitialized`). Each block forgets what its statements added as it ends,
+    /// an expression what its operands added, and a closure's body starts with none.
     known_init: Vec<(usize, usize)>,
     /// The calls and `new`s of static methods and constructors that start with their class's
     /// initialization check, written as calls of their functions (`entry_call`).
