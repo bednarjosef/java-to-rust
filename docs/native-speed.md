@@ -387,7 +387,10 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   "Objects on the stack"): the iterator of a loop over a list that is nearly always an
   `ArrayList` is then never allocated, as a JIT's escape analysis would do after inlining.
   A cast that is the receiver of such a call (`((List) entry.getValue()).iterator()`) tests for
-  the call's classes first (docs/object-model.md, 1.5).
+  the call's classes first (docs/object-model.md, 1.5). A call that every class runs the same
+  way, one method of their base class's fields reached through `base()` (the server's lighting
+  engine's private `calculatePriority`), gets no such dispatcher, whose arms would all run that
+  method: 68 of the server's 1,094 were of that kind.
 - **Checks removed**: null checks on never-null references, bounds checks inside proven ranges,
   write barriers on young objects, monitors on objects that never reach another thread.
 - **Smaller objects**: unused fields removed, integers proven small stored as `u8` or `u16`,

@@ -117,6 +117,24 @@ const HEIGHTS: &str = "public class Main {
     }
 }";
 
+const GRAPHS: &str = "public class Main {
+    abstract static class Graph {
+        final int levels; Graph(int levels) { this.levels = levels; }
+        abstract boolean source(long n);
+        private int priority(int a, int b) { return Math.min(Math.min(a, b), levels - 1); }
+        int check(long n, int a, int b) { return source(n) ? 0 : priority(a, b); }
+    }
+    static final class Tickets extends Graph { Tickets() { super(8); } boolean source(long n) { return n == 7; } }
+    static final class Sections extends Graph { Sections() { super(16); } boolean source(long n) { return n < 0; } }
+    static final class Chunks extends Graph { Chunks() { super(32); } boolean source(long n) { return false; } }
+    public static void main(String[] args) {
+        Graph[] gs = { new Tickets(), new Sections(), new Chunks() };
+        int sum = 0;
+        for (int i = 0; i < 30; i++) sum += gs[i % 10 == 0 ? 1 + i % 2 : 0].check(i, i % 5, i % 9);
+        System.out.println(sum);
+    }
+}";
+
 const CASTS: &str = "public class Main {
     interface Shape { int area(); }
     static final class Square implements Shape {
@@ -309,4 +327,16 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
             "MainShape__area_among_",
         ],
     );
+
+    // A call that every class runs the same way, a private method of their base class's fields,
+    // tests for no class first, where the virtual call beside it does.
+    let counted = counted_of(GRAPHS);
+    let (source, priority) = (count_key(&counted, "#source"), count_key(&counted, "#priority"));
+    let tickets = class_number(&counted, "MainTickets");
+    let profiled = translate_profiled(
+        GRAPHS,
+        &format!("{source}\t{tickets}:2700 *:300\n{priority}\t{tickets}:2700 *:300\n"),
+    );
+    assert_contains(&profiled, &["MainGraph__source_among_", "MainGraph__priority(this, a, b)"]);
+    assert!(!profiled.contains("MainGraph__priority_among_"), "{profiled}");
 }

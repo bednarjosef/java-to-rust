@@ -2011,7 +2011,11 @@ impl<'a> Gen<'a> {
             return call;
         }
         let group = self.class.hierarchy.group_id(resolved);
-        let among = self.closed_among(t, receiver, resolved);
+        // A call that every class runs the same way, one fields body reached through `base()`
+        // (`fields_call`), tests no class first: its arms would all run that body.
+        let among = self
+            .closed_among(t, receiver, resolved)
+            .filter(|_| self.fields_body(t, resolved, &self.enum_variants(t)).is_none());
         let name = match among {
             Some((key, closed))
                 if self.enum_body(t, resolved).is_none() || self.copies_among(t, key, resolved) =>
@@ -3236,6 +3240,17 @@ impl<'a> Gen<'a> {
     /// fields struct at or above the one `base()` lends, and `base()` reads that with no `match`
     /// (`base_fn`): `this.base().base.get_name()`, one call whatever the object's class.
     fn fields_call(&mut self, t: usize, r: usize, variants: &[usize], args: &str) -> Option<String> {
+        let (i, d) = self.fields_body(t, r, variants)?;
+        let root = self.fields_root(t)?;
+        self.need(Need::Base(t));
+        let path = hierarchy::base_path(self.facts, self.class, root, d);
+        let call = format!("this.base().{path}{}({args})", self.fn_names[i]);
+        Some(self.covariant_ret(i, r, call))
+    }
+
+    /// The body that every class of `variants` runs for method `r` of the enum of `t`, and the
+    /// fields struct it is emitted on, where `fields_call` calls it through `base()`.
+    fn fields_body(&self, t: usize, r: usize, variants: &[usize]) -> Option<(usize, usize)> {
         let h = &self.class.hierarchy;
         let i = h.implementation(r, *variants.first()?)?;
         let Home::Fields(d) = self.homes[i] else { return None };
@@ -3243,13 +3258,7 @@ impl<'a> Gen<'a> {
         let direct = self.plain_enum(t)
             && h.is_subtype(root, d)
             && variants.iter().all(|&c| h.implementation(r, c) == Some(i) && self.object_variant(c));
-        if !direct {
-            return None;
-        }
-        self.need(Need::Base(t));
-        let path = hierarchy::base_path(self.facts, self.class, root, d);
-        let call = format!("this.base().{path}{}({args})", self.fn_names[i]);
-        Some(self.covariant_ret(i, r, call))
+        direct.then_some((i, d))
     }
 
     /// The arm for a value of class `c` bound to `o` that runs no method of the program for
