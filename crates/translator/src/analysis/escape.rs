@@ -244,7 +244,12 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     // many calls (the reflection's `Method.invoke`, which calls every method that reflection may
     // run) or by one call that may run thousands of them (`f.apply(this)`, a call of every
     // lambda's `Function.apply`), is solved again only once they settle, not after each of them
-    // changes. The least fixpoint is the same in any order.
+    // changes. In a component the methods are then solved in rounds: one solved fewer times goes
+    // first, so that a change that reaches many of them (each of Gson's adapters' `write` calls
+    // every adapter's) is taken by all before any of them is solved again. Smallest first alone
+    // solved a small method again after each change of any other, 10,000 times for one `write`
+    // of the Minecraft server, ten times the solves in all. The least fixpoint is the same in any
+    // order.
     let callees: Vec<Vec<usize>> = {
         let mut callees = vec![Vec::new(); n];
         for (t, cs) in callers.iter().enumerate() {
@@ -263,8 +268,10 @@ pub fn stack_objects(class: &Class) -> StackObjects {
         .zip(&callees)
         .map(|(c, cs)| c.assigns.len() + c.calls.len() + cs.len())
         .collect();
-    let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize, usize)>> =
-        (0..n).map(|m| std::cmp::Reverse((rank[m], size[m], m))).collect();
+    let mut work: std::collections::BinaryHeap<std::cmp::Reverse<(usize, u32, usize, usize)>> =
+        (0..n).map(|m| std::cmp::Reverse((rank[m], 0, size[m], m))).collect();
+    // The times each method has been solved, its round.
+    let mut rounds = vec![0u32; n];
     let mut solves = 0;
     // Once the summaries are final, what solving a method finds depends on the factories only
     // through those that its calls run (`active`, `site_class`): each method's last facts are
@@ -272,8 +279,9 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     let mut kept: Vec<Option<Kept>> = (0..n).map(|_| None).collect();
     // The time each method's solves took, for --timings.
     let mut spent: Vec<(f64, u32)> = if crate::timings::enabled() { vec![(0.0, 0); n] } else { Vec::new() };
-    while let Some(std::cmp::Reverse((_, _, m))) = work.pop() {
+    while let Some(std::cmp::Reverse((_, _, _, m))) = work.pop() {
         queued[m] = false;
+        rounds[m] += 1;
         solves += 1;
         let start = (!spent.is_empty()).then(std::time::Instant::now);
         let MethodFacts { summary, read, staying, product } = analysis.solve(m);
@@ -291,7 +299,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
             analysis.set_summary(m, summary);
             for &caller in &callers[m] {
                 if !std::mem::replace(&mut queued[caller], true) {
-                    work.push(std::cmp::Reverse((rank[caller], size[caller], caller)));
+                    work.push(std::cmp::Reverse((rank[caller], rounds[caller], size[caller], caller)));
                 }
             }
         }
