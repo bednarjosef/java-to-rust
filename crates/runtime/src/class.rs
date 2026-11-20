@@ -673,6 +673,20 @@ impl Class {
         }
     }
 
+    /// `check_cast_numbered`, where a `catch` or a `finally` sees its `ClassCastException`: the
+    /// failure is returned, to go on as a thrown exception does, with no unwinding to catch.
+    #[inline(always)]
+    pub fn try_check_cast_numbered<'n>(
+        &self,
+        number: Option<u16>,
+        names: impl FnOnce() -> Option<&'n [&'n str]>,
+    ) -> Result<(), crate::Exception> {
+        match number.and_then(|n| self.holds(n)) {
+            Some(true) => Ok(()),
+            _ => self.try_check_cast(names()),
+        }
+    }
+
     /// Whether the class is among `names`, those of a value's class and of the classes above it:
     /// for a `leaf`, whether it is the first.
     #[inline(always)]
@@ -710,9 +724,26 @@ impl Class {
         if let Some(names) = names
             && !self.above(names)
         {
-            let from = names.first().copied().unwrap_or("java.lang.Object");
-            crate::throw("java.lang.ClassCastException", &format!("Cannot cast {from} to {}", self.shown()));
+            crate::throw("java.lang.ClassCastException", &self.cast_message(names));
         }
+    }
+
+    /// `check_cast`, where a `catch` or a `finally` sees its `ClassCastException`, which is
+    /// returned.
+    pub fn try_check_cast(&self, names: Option<&[&str]>) -> Result<(), crate::Exception> {
+        match names {
+            Some(names) if !self.above(names) => {
+                Err(crate::Exception::new("java.lang.ClassCastException", self.cast_message(names)))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The message of `cast`'s `ClassCastException` for a value whose class's names are `names`.
+    #[cold]
+    fn cast_message(&self, names: &[&str]) -> String {
+        let from = names.first().copied().unwrap_or("java.lang.Object");
+        format!("Cannot cast {from} to {}", self.shown())
     }
 
     /// `hashCode()`: Java's is the class object's identity hash, which nothing can depend on; this

@@ -6990,6 +6990,27 @@ fn use_sites_check_cast() {
 }
 
 #[test]
+fn a_class_cast_that_a_catch_sees_is_checked_in_place() {
+    // `Class.cast` that fails where a `catch` sees its `ClassCastException` returns it as an error
+    // from the cast (`Class::try_check_cast`), rather than running inside `java::catching`, and one
+    // that no `catch` sees panics as before.
+    let rust = translate(
+        "class P {}
+        class Q {}
+        class A { public static void main(String[] a) {
+            Object[] values = { new P(), new Q() };
+            try { P p = P.class.cast(values[a.length + 1]); System.out.println(p); }
+            catch (ClassCastException e) { System.out.println(\"caught: \" + e.getMessage()); }
+            Q q = Q.class.cast(values[1]);
+            System.out.println(q);
+        } }",
+    );
+    assert_contains(&rust, &["try_check_cast", "Err(e) => break 'attempt Err(Throwable::j2r_raised(e))"]);
+    assert_contains(&rust, &[".check_cast"]);
+    assert_lacks(&rust, &["java::catching("]);
+}
+
+#[test]
 fn bounded_type_variables_erase_to_the_bound() {
     let rust = translate(GENERICS);
     // `Comparable` is an enum like `Object`: a string compares by its text, a class by its own
