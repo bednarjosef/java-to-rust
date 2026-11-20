@@ -857,16 +857,18 @@ impl<'a> Gen<'a> {
     }
 
     /// The static `DISPATCH_NAMES` at the crate root, in a translation that counts the classes of
-    /// calls' receivers: each class's binary name at its class number (`dispatch::plain_binary_name`),
-    /// empty for an array, which `java::count_dispatch` writes in its counts.
+    /// calls' receivers: each class's name in a profile at its class number
+    /// (`dispatch::profile_names`), empty for an array, which `java::count_dispatch` writes in its
+    /// counts.
     pub(super) fn dispatch_names_table(&self) -> String {
         if std::env::var_os("JAVA_TO_RUST_COUNT_DISPATCH").is_none() {
             return String::new();
         }
         let mut entries = vec!["\"\"".to_string(); self.class.types.len() + 1];
-        for t in (0..self.class.types.len()).filter(|&t| self.class.array_of(t).is_none()) {
-            entries[usize::from(self.class_tag(t))] =
-                rust_string(&super::dispatch::plain_binary_name(self.class, t));
+        for (t, name) in super::dispatch::profile_names(self.class).into_iter().enumerate() {
+            if let Some(name) = name {
+                entries[usize::from(self.class_tag(t))] = rust_string(&name);
+            }
         }
         format!(
             "static {DISPATCH_NAMES}: [&str; {}] = [\n{}];\n",

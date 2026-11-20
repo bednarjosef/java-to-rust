@@ -376,8 +376,10 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   of each receiver (`java::count_dispatch`), and writes the counts to the file
   `JAVA_DISPATCH_COUNTS` names when the program exits: a line per call, keyed by the method it
   is in, its place in the source and the method called (`codegen::dispatch::profile_key`), with
-  the counts by class, each named by its binary name (`Main$Square:1900`) from a table that only
-  a counting translation has (`DISPATCH_CLASS_NAMES`). A translation made with
+  the counts by class, each named by its binary name (`Main$Square:1900`), followed by the
+  type's own name where several types share one, as a class's lambdas do
+  (`dispatch::profile_names`), from a table that only a counting translation has
+  (`DISPATCH_CLASS_NAMES`). A translation made with
   `JAVA_TO_RUST_DISPATCH_PROFILE` naming that file gives each call that saw one class in 75% of
   at least 1000 calls, or two in 85%, the inlined dispatcher among those classes (`_among_`): a
   test of the class number and a direct call the compiler can inline, with the whole dispatcher

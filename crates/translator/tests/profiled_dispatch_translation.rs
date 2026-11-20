@@ -135,6 +135,15 @@ const GRAPHS: &str = "public class Main {
     }
 }";
 
+const LAMBDAS: &str = "public class Main {
+    static int run(java.util.function.IntSupplier s) { return s.getAsInt(); }
+    public static void main(String[] args) {
+        int n = 0;
+        for (int i = 0; i < 3; i++) { n += run(() -> 1) + run(() -> 2); }
+        System.out.println(n);
+    }
+}";
+
 const CASTS: &str = "public class Main {
     interface Shape { int area(); }
     static final class Square implements Shape {
@@ -350,4 +359,18 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     );
     assert_contains(&profiled, &["MainGraph__source_among_", "MainGraph__priority(this, a, b)"]);
     assert!(!profiled.contains("MainGraph__priority_among_"), "{profiled}");
+
+    shared_binary_names_are_told_apart();
+}
+
+/// Types that share a binary name have their own names in a profile: both lambdas are
+/// `Main$$Lambda` to Java, and the counts name each by its own type too.
+fn shared_binary_names_are_told_apart() {
+    let counted = counted_of(LAMBDAS);
+    let names = counted.find("static DISPATCH_CLASS_NAMES").expect("the names table");
+    let names = &counted[names..names + counted[names..].find("];").unwrap()];
+    let lambdas: Vec<&str> = names.lines().filter(|l| l.contains("Main$$Lambda/")).collect();
+    assert_eq!(lambdas.len(), 2, "{names}");
+    assert_ne!(lambdas[0], lambdas[1]);
+    assert!(!names.contains("\"Main$$Lambda\""), "{names}");
 }

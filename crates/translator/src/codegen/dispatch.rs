@@ -72,6 +72,25 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
 
 /// The binary name of type `t` of `class`, not an array's, as `Class.getName()` gives it
 /// (`Gen::binary_name`), which names a class in a dispatch profile (`profiled_sets`) too.
+/// The name of each type in a dispatch profile, `None` for arrays: its binary name, which stays
+/// the same across translations while class numbers move, or, where several types share it (a
+/// class's lambdas, all `Main$$Lambda`), that name and the type's own
+/// (`Main$$Lambda/MainSupplierLambdaInRun2`).
+pub(super) fn profile_names(class: &Class) -> Vec<Option<String>> {
+    let binary: Vec<Option<String>> = (0..class.types.len())
+        .map(|t| class.array_of(t).is_none().then(|| plain_binary_name(class, t)))
+        .collect();
+    let mut shared: HashMap<&str, usize> = HashMap::new();
+    for name in binary.iter().flatten() {
+        *shared.entry(name).or_default() += 1;
+    }
+    let unique = |t: usize, name: &String| match shared[name.as_str()] {
+        1 => name.clone(),
+        _ => format!("{name}/{}", class.types[t].name),
+    };
+    binary.iter().enumerate().map(|(t, name)| name.as_ref().map(|name| unique(t, name))).collect()
+}
+
 pub(super) fn plain_binary_name(class: &Class, t: usize) -> String {
     let decl = &class.types[t];
     if decl.kind == TypeKind::Runtime {
@@ -176,8 +195,10 @@ pub(super) fn profiled_sets(class: &Class, numbers: &[u16]) -> HashMap<String, s
     let class_of: HashMap<u16, usize> = numbers.iter().enumerate().map(|(t, &n)| (n, t)).collect();
     // A name that two types share names neither.
     let mut named: HashMap<String, Option<usize>> = HashMap::new();
-    for t in (0..class.types.len()).filter(|&t| class.array_of(t).is_none()) {
-        named.entry(plain_binary_name(class, t)).and_modify(|t| *t = None).or_insert(Some(t));
+    for (t, name) in profile_names(class).into_iter().enumerate() {
+        if let Some(name) = name {
+            named.entry(name).and_modify(|t| *t = None).or_insert(Some(t));
+        }
     }
     let class_named = |text: &str| match text.parse::<u16>() {
         Ok(number) => class_of.get(&number).copied(),
