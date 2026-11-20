@@ -519,8 +519,9 @@ keeps (`gc/references.rs`, `weak.rs`).
   load.
 - **Threads stopped mid-read.** Threads are stopped by a signal wherever they are, so one may be
   stopped between loading a referent's inverted word and decoding it. Once any reference is
-  registered, every root word is therefore also read inverted, which may keep a referent for one
-  more collection, never lose one.
+  registered, every word of the threads' stacks and registers is therefore also read inverted,
+  which may keep a referent for one more collection, never lose one. Thread-locals, like
+  statics, are memory the program writes, never a load in progress, and are read once.
 
 What a program can see: a referent that nothing else keeps is cleared at some collection after
 the last strong use, as on a JVM; when depends on when the collector runs, which here is when the

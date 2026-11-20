@@ -2416,9 +2416,9 @@ impl Marker {
         Some(unsafe { (*m).marks[w] } & bit != 0)
     }
 
-    /// Scans the words of `[from, to)` of a root, inverted too, once the program has references
-    /// (`references`): a thread stopped while it reads a referent (`java::WeakField`) may hold
-    /// its word inverted.
+    /// Scans the words of `[from, to)` of a thread's stack or registers, inverted too, once the
+    /// program has references (`references`): a thread stopped while it reads a referent
+    /// (`java::WeakField`) may hold its word inverted.
     fn root_range(&mut self, from: usize, to: usize) {
         self.range(from, to);
         if references::USED.load(Ordering::Relaxed) {
@@ -2971,7 +2971,8 @@ fn mark_and_sweep(
         }
         let tp = if i == me { thread_pointer() } else { t.thread_pointer.get() };
         if tls > 0 && tp != 0 {
-            timed(1, tls, &mut || marker.root_range(tp - tls, tp));
+            // Not inverted: a load in progress is in a register or on the stack, not here.
+            timed(1, tls, &mut || marker.range(tp - tls, tp));
             marker.drain();
         }
         if i == me {
