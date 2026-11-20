@@ -275,10 +275,11 @@ fn anew(class: &Class, setup: &Setup, wanted: &Needs, needs: &Needs) -> OnlyEnum
 
 /// The written program, unless some of its methods have a call that throws inside a closure: those
 /// methods, and then any other code.
-fn finished(tree: ModuleTree, closures: Vec<Error>) -> Result<ModuleTree, Vec<Error>> {
+fn finished(mut tree: ModuleTree, closures: Vec<Error>) -> Result<ModuleTree, Vec<Error>> {
     if !closures.is_empty() {
         return Err(closures);
     }
+    crate::timings::phase("codegen: entry splits joined", || statics::join_unused_entry_splits(&mut tree));
     for module in &tree.modules {
         exceptions::check_closures(&module.items_text()).map_err(|e| vec![e])?;
     }
@@ -1756,8 +1757,10 @@ impl<'a> Gen<'a> {
         // A constructor of a generic class is a function of its `impl`.
         let in_impl = !matches!(self.homes[index], Home::Free) && !self.module_fn(index);
         let path = if in_impl { format!("Self::{inner}") } else { inner.to_string() };
-        // Every call may be one where the class is known to be initialized.
+        // Every call may be one where the class is known to be initialized. The marker finds the
+        // function for `statics::join_unused_entry_splits`.
         self.line("#[inline]");
+        self.line(statics::ENTRY_CHECK_MARKER);
         self.line("#[allow(dead_code)]");
         self.line(&format!("{}fn {name}({}){ret} {{", self.vis(), params.join(", ")));
         self.indent += 1;

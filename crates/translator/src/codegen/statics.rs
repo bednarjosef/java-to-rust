@@ -11,7 +11,8 @@
 //! there (`uninitialized`). The `init` function is inlined and only tests whether initialization
 //! has started; `init_..._slow`, out of line, runs it. A static method or constructor that starts
 //! with the call is two functions (`split_entry`), so that a caller that knows the class is
-//! initialized calls the one without it.
+//! initialized calls the one without it; where callers of only one kind exist, the written
+//! program has one function again (`join_unused_entry_splits`).
 //!
 //! In a program that starts threads, the statics that the started threads' code may touch
 //! (`Facts::process_statics`, by class) have one copy for the process: a primitive is a
@@ -50,6 +51,214 @@ pub(super) fn init_name(class: &str) -> String {
 /// check ends with, after the name of the one that has (`Gen::split_entry`). A Java name in snake
 /// case has no `__` but where it had `$$`.
 pub(super) const INITIALIZED: &str = "__initialized";
+
+/// The line that `Gen::entry_check_fn` writes among the attributes of the function of a split
+/// method that runs the check, for `join_unused_entry_splits` to find it, which takes it away.
+pub(super) const ENTRY_CHECK_MARKER: &str = "#[cfg_attr(any(), entry_check)]";
+
+/// Undoes the split of a static method or constructor (`Gen::split_entry`) where one of its two
+/// functions is not called. Where no code but the function with the check calls the one with the
+/// code, the two are joined back into one function of the method's name, which runs the check and
+/// then the code; where no code calls the function with the check (a constructor that only
+/// subclasses' `super(..)` calls), that function goes. A split is only worth its second function
+/// where callers of both kinds exist; each function is one more for the compiler to hold, and the
+/// Minecraft server's header crate, where most splits had callers of one kind, took a fifth more
+/// functions and more memory than rustc had. A function is found uncalled when its name is in the
+/// program once besides the call in the function with the check (`count_names`): a name shared
+/// with functions of other modules counts their uses too, which keeps the split.
+pub(super) fn join_unused_entry_splits(tree: &mut ModuleTree) {
+    let uses: HashMap<String, usize> = {
+        let mut names: HashMap<&str, usize> = HashMap::new();
+        for item in tree.modules.iter().flat_map(|m| &m.items).filter(|i| i.text.contains(ENTRY_CHECK_MARKER))
+        {
+            let lines: Vec<&str> = item.text.lines().collect();
+            for at in 0..lines.len() {
+                if let Some(split) = EntrySplit::at(&lines, at) {
+                    for name in [split.inner, split.name] {
+                        let next = names.len();
+                        names.entry(name).or_insert(next);
+                    }
+                }
+            }
+        }
+        if names.is_empty() {
+            return;
+        }
+        // Every text of the program: a `use` line may name a function too.
+        let texts: Vec<&str> = [tree.header.as_str(), tree.footer.as_str()]
+            .into_iter()
+            .chain(tree.modules.iter().flat_map(|m| m.uses.iter().map(String::as_str)))
+            .chain(tree.modules.iter().flat_map(|m| &m.items).map(|i| i.text.as_str()))
+            .collect();
+        let counts = count_names(&texts, &names);
+        names.into_iter().map(|(name, at)| (name.to_string(), counts[at])).collect()
+    };
+    let (mut kept, mut joined_splits, mut unchecked) = (0, 0, 0);
+    for module in &mut tree.modules {
+        for item in &mut module.items {
+            if !item.text.contains(ENTRY_CHECK_MARKER) {
+                continue;
+            }
+            let lines: Vec<&str> = item.text.lines().collect();
+            let mut joined = String::with_capacity(item.text.len());
+            let mut at = 0;
+            while at < lines.len() {
+                // The split starts on the line before its marker.
+                let split = EntrySplit::at(&lines, at + 1);
+                let is_split = split.is_some();
+                if let Some(split) = &split
+                    && uses.get(split.name) == Some(&1)
+                {
+                    // The function with the check goes; the one with the code stays as it is.
+                    at = split.code_at;
+                    unchecked += 1;
+                    continue;
+                }
+                if let Some(split) = split
+                    && uses.get(split.inner) == Some(&2)
+                {
+                    // The function with the check goes; the one with the code takes its name and
+                    // runs the check first.
+                    for line in &lines[split.code_at..split.code_fn] {
+                        joined.push_str(line);
+                        joined.push('\n');
+                    }
+                    let signature = lines[split.code_fn].replacen(
+                        &format!("fn {}(", split.inner),
+                        &format!("fn {}(", split.name),
+                        1,
+                    );
+                    joined.push_str(&signature);
+                    joined.push('\n');
+                    joined.push_str(split.check);
+                    joined.push('\n');
+                    at = split.code_fn + 1;
+                    joined_splits += 1;
+                    continue;
+                }
+                kept += usize::from(is_split);
+                // A split that stays loses its marker, which has done its work.
+                if lines[at].trim() != ENTRY_CHECK_MARKER {
+                    joined.push_str(lines[at]);
+                    joined.push('\n');
+                }
+                at += 1;
+            }
+            if !item.text.ends_with('\n') {
+                joined.pop();
+            }
+            item.text = joined;
+        }
+    }
+    if crate::timings::enabled() {
+        eprintln!(
+            "timing: codegen: entry splits: {joined_splits} joined, {unchecked} called only without the check, {kept} kept"
+        );
+    }
+}
+
+/// A split method's two functions as `Gen::entry_check_fn` and `Gen::write_method` write them, by
+/// lines: `#[inline]`, the marker, `#[allow(dead_code)]`, the signature, the check, the call of
+/// the function with the code and the closing brace; then, after at most one attribute, the
+/// signature of the function with the code.
+struct EntrySplit<'a> {
+    /// The name of the function with the check, the method's.
+    name: &'a str,
+    /// The name of the function with the code.
+    inner: &'a str,
+    /// The line of the check, as indented in the function with the check, as in the other.
+    check: &'a str,
+    /// The first line after the function with the check.
+    code_at: usize,
+    /// The line of the signature of the function with the code.
+    code_fn: usize,
+}
+
+impl<'a> EntrySplit<'a> {
+    /// The split whose marker is line `at` of `lines`.
+    fn at(lines: &[&'a str], at: usize) -> Option<Self> {
+        if lines.get(at).is_none_or(|l| l.trim() != ENTRY_CHECK_MARKER)
+            || at == 0
+            || lines[at - 1].trim() != "#[inline]"
+        {
+            return None;
+        }
+        let [_, signature, check, call, close, ..] = lines.get(at + 1..)? else { return None };
+        let name = fn_name(signature)?;
+        let call = call.trim();
+        let inner = call.strip_prefix("Self::").unwrap_or(call);
+        let inner = &inner[..inner.find('(')?];
+        if close.trim() != "}"
+            || !(inner.ends_with(INITIALIZED) || inner.contains(&format!("{INITIALIZED}_")))
+        {
+            return None;
+        }
+        let code_at = at + 6;
+        let code_fn =
+            (code_at..(code_at + 2).min(lines.len())).find(|&l| fn_name(lines[l]) == Some(inner))?;
+        Some(EntrySplit { name, inner, check, code_at, code_fn })
+    }
+}
+
+/// The name of the function whose signature starts line `line`.
+fn fn_name(line: &str) -> Option<&str> {
+    let after = &line[line.find("fn ")? + 3..];
+    Some(&after[..after.find('(')?])
+}
+
+/// How often each of `names` (by its place in the counts) is in `texts` as a whole word, counted
+/// on several threads: the Minecraft server's program is hundreds of megabytes of text. A text is
+/// cut into pieces at line breaks, which no word spans, so that the crate root's few large items
+/// are shared among the threads.
+fn count_names(texts: &[&str], names: &HashMap<&str, usize>) -> Vec<usize> {
+    const PIECE: usize = 1 << 22;
+    let mut pieces = Vec::new();
+    for text in texts {
+        let mut rest = *text;
+        while rest.len() > PIECE {
+            // A line break is one byte, which no character's encoding has inside it.
+            let cut = rest.as_bytes()[PIECE..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(rest.len(), |at| PIECE + at + 1);
+            let (piece, after) = rest.split_at(cut);
+            pieces.push(piece);
+            rest = after;
+        }
+        pieces.push(rest);
+    }
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let count = || {
+        let mut counts = vec![0; names.len()];
+        let word = |b: &u8| b.is_ascii_alphanumeric() || *b == b'_';
+        while let Some(text) = pieces.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+            let bytes = text.as_bytes();
+            let mut at = 0;
+            while at < bytes.len() {
+                if !word(&bytes[at]) {
+                    at += 1;
+                    continue;
+                }
+                let end = bytes[at..].iter().position(|b| !word(b)).map_or(bytes.len(), |p| at + p);
+                if let Some(&n) = names.get(&text[at..end]) {
+                    counts[n] += 1;
+                }
+                at = end;
+            }
+        }
+        counts
+    };
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads).map(|_| scope.spawn(count)).collect();
+        let mut total = vec![0; names.len()];
+        for handle in handles {
+            let counts = handle.join().expect("counting names does not panic");
+            total.iter_mut().zip(counts).for_each(|(t, c)| *t += c);
+        }
+        total
+    })
+}
 
 /// The flag that records that a class's static initialization has started.
 fn flag(class: &str) -> String {

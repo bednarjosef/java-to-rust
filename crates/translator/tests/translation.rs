@@ -2864,7 +2864,8 @@ fn a_known_initialized_class_is_called_without_its_check() {
             // A static method or constructor that another class calls checks its class in a
             // function of its own name, which calls the one with its code.
             "fn Pos__new(x: i32, y: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x, y)\n}",
-            "fn pack(x: i32, y: i32) -> i32 {\n    init_pos();\n    pack__initialized(x, y)\n}",
+            // Every call of `pack` follows a `new Pos`: only the function without the check.
+            "fn pack__initialized(x: i32, y: i32) -> i32 {",
             // `super(..)` initializes nothing, and Vec is initialized before Pos.
             "Pos { base: Vec_Fields__new__initialized(x, y) }",
             // Pos's own code knows Pos is initialized.
@@ -2876,7 +2877,44 @@ fn a_known_initialized_class_is_called_without_its_check() {
             "pack__initialized(p.above_on_stack(&slot_2).base.x, 0).wrapping_add(VEC_MADE.get())",
         ],
     );
-    assert_lacks(&rust, &["init_vec(); VEC_MADE"]);
+    assert_lacks(&rust, &["init_vec(); VEC_MADE", "fn pack("]);
+}
+
+#[test]
+fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
+    let rust = translate(
+        "class Vec {
+            static int made;
+            static { System.out.println(\"vec\"); }
+            final int x;
+            Vec(int x) { this.x = x; made++; }
+        }
+        class Pos extends Vec {
+            static { System.out.println(\"pos\"); }
+            Pos(int x) { super(x); }
+            Pos next() { return new Pos(x + 1); }
+            static int once(int v) { return v * 3; }
+        }
+        public class A {
+            public static void main(String[] args) {
+                System.out.println(new Pos(1).next().x + Pos.once(2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // Pos's constructor is called with its check (from A) and without (from Pos's own
+            // code): two functions.
+            "fn Pos__new(x: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x)\n}",
+            // Nothing calls `once` without its check: one function, which runs the check.
+            "fn once(v: i32) -> i32 {\n    init_pos();\n",
+            // Only `super(..)` calls Vec's constructor, without its check.
+            "Pos { base: Vec_Fields__new__initialized(x) }",
+        ],
+    );
+    // The split that stays keeps no trace of the marker that found it.
+    assert_lacks(&rust, &["once__initialized", "fn Vec_Fields__new(", "entry_check"]);
 }
 
 #[test]

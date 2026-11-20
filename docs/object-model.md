@@ -480,7 +480,12 @@ constructor without a check (Java's `super(..)` initializes nothing, and `Vec3i`
 before `BlockPos`), and `new BlockPos(..)` in `BlockPos`'s own methods checks nothing. A loop of
 the Minecraft server that made a `BlockPos` in another class's method tested both flags on every
 pass. A generic static method, whose type arguments the call of the second function would have
-to name, keeps the check in its one function. A method that lowering adds for an expression
+to name, keeps the check in its one function. Once the whole program is written, a split whose
+second function only the first calls is joined back into one function that runs the check and
+then the code, and a first function that nothing calls (a constructor that only subclasses'
+`super(..)` call) is left out (`join_unused_entry_splits`): each function is one more for rustc
+to hold, and without this the Minecraft server's header crate had a fifth more functions than
+it needed. A method that lowering adds for an expression
 (`Method::added`, `lower/added_methods.rs`), such as the one every `Class.forName` with a
 computed name calls, is put in the class whose code it first meets but stands for the code at
 its call sites, so calling it does not initialize that class.
