@@ -461,6 +461,10 @@ pub struct Class {
     /// (`lower::handles`). In an array that threads share, they are `SeqCst` loads and stores of
     /// the element's cell.
     pub volatile_elements: HashSet<ExprId>,
+    /// The values that erasure's checked cast back to a generic member's or a covariant array
+    /// element's type wraps (`lower::generics::erased_use`), by id. javac casts neither operand
+    /// of `==`, so codegen compares such a value uncast (`Gen::erased_identity`).
+    pub erased_casts: HashSet<ExprId>,
     /// The proxy classes that reachability wrote (`program/reach/proxies.rs`), whose names
     /// `TranslatedProxies` gives them at run time (`java::name_proxy_class`): the name of one's
     /// object is asked of its `java::Class`.
