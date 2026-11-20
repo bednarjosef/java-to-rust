@@ -3727,7 +3727,10 @@ impl<'a> Gen<'a> {
         let (variant, b) = (self.view_pattern(t, c), self.view_binding(c, "b"));
         let test = if self.nullable(other) {
             let place = self.object_place(other);
-            format!("{}.as_ref().is_some_and(|b| matches!(b.view(), {variant}({b}) if {same}))", operand(&place))
+            format!(
+                "{}.as_ref().is_some_and(|b| matches!(b.view(), {variant}({b}) if {same}))",
+                operand(&place)
+            )
         } else {
             let place = self.object_ref(other);
             format!("matches!({}.view(), {variant}({b}) if {same})", operand(&place))
@@ -3759,7 +3762,10 @@ impl<'a> Gen<'a> {
                 let test = if self.nullable(inner) {
                     let place = self.object_place(inner);
                     let other = self.address(c, "b");
-                    format!("{}.as_ref().is_some_and(|b| std::ptr::addr_eq({temp}, {other}))", operand(&place))
+                    format!(
+                        "{}.as_ref().is_some_and(|b| std::ptr::addr_eq({temp}, {other}))",
+                        operand(&place)
+                    )
                 } else {
                     let handle = self.object_ref(inner);
                     format!("std::ptr::addr_eq({temp}, {})", self.address(c, &handle))
