@@ -232,6 +232,17 @@ impl<'a> Gen<'a> {
         Code::atom(self.dereference(&[e.id], &option))
     }
 
+    /// Whether `e` is a field read through `this`, a variable or such a read, none of them null,
+    /// so that reading it can neither throw nor do anything else: a null test of it that is
+    /// false needs no read (a record's `c == null` of a component that is never null).
+    fn plain_read(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::This | ExprKind::Var(_) => true,
+            ExprKind::Field { object, .. } => !self.nullable(object) && self.plain_read(object),
+            _ => false,
+        }
+    }
+
     /// `x == null` and `x != null` for a string.
     pub(super) fn null_test(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
         let other = if matches!(l.kind, ExprKind::Null) { r } else { l };
@@ -277,7 +288,7 @@ impl<'a> Gen<'a> {
             let option = self.option_ref(other);
             let test = if matches!(op, BinOp::Ne) { "is_some" } else { "is_none" };
             return Code::atom(format!("{option}.{test}()"));
-        } else if matches!(other.kind, ExprKind::Var(_) | ExprKind::Str(_)) {
+        } else if matches!(other.kind, ExprKind::Var(_) | ExprKind::Str(_)) || self.plain_read(other) {
             Code::atom("false")
         } else {
             // Only the operand's effects are kept: an assignment is made as a statement, as its

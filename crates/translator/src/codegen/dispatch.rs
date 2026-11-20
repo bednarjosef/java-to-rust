@@ -3832,6 +3832,49 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// `a == b` where one operand is a non-null object of a class made a value of an enum (`this
+    /// == o` in an `equals`, `o` an `Object`) and the other is a value of that enum: the other is
+    /// viewed as an object of the class and the addresses compared, as `identity_call` does. Made
+    /// a value of the enum, the object's handle would be cloned, and two objects of the class
+    /// compared by the enum's `eq`, which asks the class to compare them by value.
+    pub(super) fn object_value_identity(&mut self, op: BinOp, l: &'a Expr, r: &'a Expr) -> Option<Code> {
+        let object_of = |this: &Self, e: &'a Expr| -> Option<(&'a Expr, usize)> {
+            let ExprKind::Cast(_, inner) = &e.kind else { return None };
+            let inner = this.peel(inner);
+            if this.enum_of(inner).is_some() || this.nullable(inner) {
+                return None;
+            }
+            let c = this.struct_class(inner)?;
+            (this.runtime_of(c).is_none() && !this.holds_value(c)).then_some((inner, c))
+        };
+        let ((object, c), other) = match (object_of(self, l), object_of(self, r)) {
+            (Some(object), None) => (object, r),
+            // The object's address is found first, so the operand before it must have no effects.
+            (None, Some(object)) if !has_effects(l) => (object, l),
+            _ => return None,
+        };
+        let t = self.enum_of(other)?;
+        if !self.is_enum_variant(t, c) {
+            return None;
+        }
+        let address = self.receiver_address(object, c);
+        let temp = self.temp("address");
+        let same = format!("std::ptr::addr_eq({temp}, {})", self.address(c, "b"));
+        let (variant, b) = (self.view_pattern(t, c), self.view_binding(c, "b"));
+        let test = if self.nullable(other) {
+            let place = self.object_place(other);
+            format!(
+                "{}.as_ref().is_some_and(|b| matches!(b.view(), {variant}({b}) if {same}))",
+                operand(&place)
+            )
+        } else {
+            let place = self.object_ref(other);
+            format!("matches!({}.view(), {variant}({b}) if {same})", operand(&place))
+        };
+        let code = format!("{{ let {temp} = {address}; {test} }}");
+        Some(if op == BinOp::Ne { Code::new(format!("!{code}"), UNARY) } else { Code::atom(code) })
+    }
+
     /// Whether the first parameter of method `r` is borrowed, so that it is a reference already.
     fn lends(&self, r: usize) -> bool {
         self.facts.borrowed_objects.contains(&(r, 0))
@@ -3845,6 +3888,26 @@ impl<'a> Gen<'a> {
         let address = self.receiver_address(receiver, c);
         if self.class.methods[r].name == "hashCode" {
             return Code::atom(format!("{}({address})", self.runtime("address_hash")));
+        }
+        // An argument that is an object of the receiver's class, made an `Object`: its address,
+        // without making it a value of the enum (a record's identity component, `c.equals(that.c)`).
+        if let ExprKind::Cast(_, inner) = &args[0].kind {
+            let inner = self.peel(inner);
+            if self.enum_of(inner).is_none() && self.struct_class(inner) == Some(c) {
+                let temp = self.temp("address");
+                let test = if self.nullable(inner) {
+                    let place = self.object_place(inner);
+                    let other = self.address(c, "b");
+                    format!(
+                        "{}.as_ref().is_some_and(|b| std::ptr::addr_eq({temp}, {other}))",
+                        operand(&place)
+                    )
+                } else {
+                    let handle = self.object_ref(inner);
+                    format!("std::ptr::addr_eq({temp}, {})", self.address(c, &handle))
+                };
+                return Code::atom(format!("{{ let {temp} = {address}; {test} }}"));
+            }
         }
         let arg = self.call_args(r, args).remove(0);
         let p = &self.class.methods[r].params[0];

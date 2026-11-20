@@ -1288,6 +1288,9 @@ impl<'a> Gen<'a> {
             let same = format!("{}({a}, {b})", self.runtime("same_object"));
             return if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) };
         }
+        if let Some(code) = self.object_value_identity(op, l, r) {
+            return code;
+        }
         if self.enum_of(l).is_some() || self.enum_of(r).is_some() {
             return self.enum_identity(op, l, r);
         }

@@ -60,7 +60,7 @@ fn a_record_equals_compares_its_components_as_java_does() {
     );
     assert_contains(
         &rust,
-        &["self.name == that.name && java::double_compare(self.weight, that.weight) == 0"],
+        &["java::double_compare(self.weight, that.weight) == 0 && self.name == that.name"],
     );
 }
 

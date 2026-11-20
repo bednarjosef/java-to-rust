@@ -10,8 +10,21 @@
 //! - `toString()` is `"Point[x=" + x + ", y=" + y + "]"`, with the record's simple name;
 //! - `hashCode()` is `31 * h + hash(c)` over the components, starting at 0, with each component's
 //!   own hash (`Double.hashCode(d)`, `Objects.hashCode(o)` for a reference);
-//! - `equals(Object o)` is `o instanceof Point that && x == that.x && ..`, comparing floating
-//!   components with `Double.compare(a, b) == 0` and references with `Objects.equals`;
+//! - `equals(Object o)` is `o instanceof Point that && y == that.y && x == that.x`, testing the
+//!   components from the last to the first, as `ObjectMethods` nests its tests, and comparing
+//!   floating components with `Double.compare(a, b) == 0` and references with `Objects.equals`.
+//!   `ObjectMethods` tests `this == o` first; that decides only where a component's own `equals`
+//!   would run on itself (below), so only then is it written, as elsewhere it would keep the
+//!   identity of records that are otherwise plain values;
+//! - a reference component whose type is a class of the program outside `java.lang` and the
+//!   charsets (which are the runtime's values), in a program that uses `Object`, is hashed and
+//!   compared through its own type instead, as `ObjectMethods` does it: `(c == null ? 0 :
+//!   c.hashCode())` and `c == null ? that.c == null : c.equals(that.c)`, which calls `equals` on
+//!   a component that is the other's too. The call's receiver then has the component's type, so
+//!   it dispatches among that class and the classes below it, where `Objects`' parameter is any
+//!   `Object` (a `TagKey`'s hash is its `ResourceKey`'s identity hash and its `Identifier`'s hash,
+//!   called directly). The class is known only once a unit declares it, so a record whose
+//!   component's class comes in a later round is written the other way until then;
 //! - an accessor `c()` returns the field.
 //!
 //! A member the record declares itself is kept. An accessor is written only when something calls
@@ -176,6 +189,8 @@ pub(super) struct Survey {
     records: HashMap<String, Vec<String>>,
     /// The program's enums by qualified name.
     enums: HashSet<String>,
+    /// The program's classes by qualified name: not its interfaces, enums or records.
+    classes: HashSet<String>,
     /// The records that get a `hashCode`.
     hashed: BTreeSet<String>,
     /// Whether the units read records' components: they call `Class.getRecordComponents`, or
@@ -218,6 +233,9 @@ impl Survey {
                 }
                 if kind == "ENUM" {
                     self.enums.insert(qualified(v));
+                }
+                if kind == "CLASS" {
+                    self.classes.insert(qualified(v));
                 }
                 if kind == "RECORD" {
                     let held = components(v).iter().map(|c| raw(&c.ty).to_string()).collect();
@@ -264,6 +282,18 @@ impl Survey {
                 work.extend(self.records[&record].iter().filter(|r| self.records.contains_key(*r)).cloned());
             }
         }
+    }
+
+    /// Whether a component of javac's type `ty` is hashed and compared through its own type (see the
+    /// module's comment): a class of the program outside `java.lang`, whose values are never
+    /// strings or boxes, so comparing them by identity is what Java does, and not a charset, which
+    /// is the runtime's value (`Type::Charset`), not an object of a class.
+    fn own_methods(&self, ty: &str) -> bool {
+        let ty = raw(ty);
+        self.uses_object
+            && self.classes.contains(ty)
+            && !ty.starts_with("java.lang.")
+            && !crate::lower::is_charset_type(ty)
     }
 
     /// Whether a value of javac's type `ty` hashes and compares without `Object`: a string, a box,
@@ -618,6 +648,29 @@ impl Pos {
         self.node("INT_LITERAL", json!({"javaType": "int", "value": i.to_string()}))
     }
 
+    fn null(&self) -> Value {
+        self.node("NULL_LITERAL", json!({"javaType": "<nulltype>"}))
+    }
+
+    fn conditional(&self, ty: &str, condition: Value, yes: Value, no: Value) -> Value {
+        let fields =
+            json!({"javaType": ty, "condition": condition, "trueExpression": yes, "falseExpression": no});
+        self.node("CONDITIONAL_EXPRESSION", fields)
+    }
+
+    /// A call of `Object`'s method `name` on `receiver`, as javac names `Object`'s methods.
+    fn instance_call(&self, receiver: Value, name: &str, sig: &str, ret: &str, args: Vec<Value>) -> Value {
+        let symbol = json!({"kind": "METHOD", "name": name, "owner": "java.lang.Object", "static": false, "type": sig});
+        let select = self.node(
+            "MEMBER_SELECT",
+            json!({"javaType": sig, "symbol": symbol, "expression": receiver, "identifier": name}),
+        );
+        self.node(
+            "METHOD_INVOCATION",
+            json!({"javaType": ret, "symbol": symbol, "arguments": args, "methodSelect": select, "typeArguments": []}),
+        )
+    }
+
     fn binary(&self, kind: &str, ty: &str, left: Value, right: Value) -> Value {
         self.node(kind, json!({"javaType": ty, "leftOperand": left, "rightOperand": right}))
     }
@@ -707,6 +760,15 @@ impl Pos {
                 // An array hashes by its identity, which no program can depend on: here it adds
                 // nothing, which keeps equal records (with the same arrays) hashing alike.
                 ty if ty.ends_with("[]") => self.int(0),
+                ty if survey.own_methods(ty) => {
+                    let hash = self.instance_call(field(c), "hashCode", "()int", "int", Vec::new());
+                    self.conditional(
+                        "int",
+                        self.binary("EQUAL_TO", "boolean", field(c), self.null()),
+                        self.int(0),
+                        hash,
+                    )
+                }
                 _ => self.objects_call(
                     "hashCode",
                     "(java.lang.Object)int",
@@ -724,13 +786,20 @@ impl Pos {
         acc.unwrap_or_else(|| self.int(0))
     }
 
-    /// `other instanceof Point that && x == that.x && ..`.
+    /// `other instanceof Point that && y == that.y && x == that.x`, after `this == other ||` where a
+    /// component is compared through its own type.
     fn equals_test(&self, this_type: &str, components: &[Component], survey: &Survey) -> Value {
         let owner = "equals(java.lang.Object)";
         let other = self.node(
             "IDENTIFIER",
             json!({"name": "other", "javaType": "java.lang.Object",
                    "symbol": {"kind": "PARAMETER", "name": "other", "owner": owner, "static": false, "type": "java.lang.Object"}}),
+        );
+        let same_object = self.binary(
+            "EQUAL_TO",
+            "boolean",
+            self.node("IDENTIFIER", json!({"name": "this", "javaType": this_type})),
+            other.clone(),
         );
         let that_symbol = json!({"kind": "BINDING_VARIABLE", "name": "that", "owner": owner, "static": false, "type": this_type});
         let variable = self.node(
@@ -745,7 +814,7 @@ impl Pos {
             json!({"javaType": "boolean", "expression": other, "pattern": pattern,
                    "type": self.node("IDENTIFIER", json!({"javaType": this_type, "name": this_type}))}),
         );
-        for c in components {
+        for c in components.iter().rev() {
             let that = self
                 .node("IDENTIFIER", json!({"name": "that", "javaType": this_type, "symbol": that_symbol}));
             let theirs = self.node(
@@ -764,6 +833,13 @@ impl Pos {
                 }
                 // An array is equal only to itself.
                 ty if ty.ends_with("[]") => self.binary("EQUAL_TO", "boolean", field(c), theirs),
+                ty if survey.own_methods(ty) => {
+                    let mine_null = self.binary("EQUAL_TO", "boolean", field(c), self.null());
+                    let theirs_null = self.binary("EQUAL_TO", "boolean", theirs.clone(), self.null());
+                    let sig = "(java.lang.Object)boolean";
+                    let equals = self.instance_call(field(c), "equals", sig, "boolean", vec![theirs]);
+                    self.conditional("boolean", mine_null, theirs_null, equals)
+                }
                 _ => self.objects_call(
                     "equals",
                     "(java.lang.Object,java.lang.Object)boolean",
@@ -775,7 +851,13 @@ impl Pos {
             };
             test = self.binary("CONDITIONAL_AND", "boolean", test, same);
         }
-        test
+        // `this == other` decides only where a component's own `equals` would run on itself:
+        // `Objects.equals` tests identity first and the other tests are reflexive. Elsewhere it is
+        // left out, as it would keep the identity of records that are otherwise plain values.
+        if !components.iter().any(|c| survey.own_methods(&c.ty)) {
+            return test;
+        }
+        self.binary("CONDITIONAL_OR", "boolean", same_object, test)
     }
 }
 

@@ -559,7 +559,11 @@ values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`
 keep `Arc::ptr_eq` and `java::same`. An operand that erasure casts back from one enum to another
 (`Class::erased_casts`: an element of a `Property[]` that is an `Object[]`, or a generic member's
 value) is compared uncast, by its bits, where either side's enum compares all its variants by
-identity, as javac casts neither operand of `==`.
+identity, as javac casts neither operand of `==`. An object of a class that no enum represents
+against a value of an enum (`this == o` in an `equals`) views the value as that class and compares
+the addresses (`Gen::object_value_identity`), as `Object.equals` on such an object does: made a
+value of the enum, the object's handle would be cloned and dropped. A null test that is false of a
+field read through `this` or a variable, none of them null, reads nothing.
 
 A string or a box inside `Object` is a plain value whose identity the translation does not
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
