@@ -70,6 +70,50 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
     numbers
 }
 
+/// The binary name of type `t` of `class`, not an array's, as `Class.getName()` gives it
+/// (`Gen::binary_name`), which names a class in a dispatch profile (`profiled_sets`) too.
+/// The name of each type in a dispatch profile, `None` for arrays: its binary name, which stays
+/// the same across translations while class numbers move, or, where several types share it (a
+/// class's lambdas, all `Main$$Lambda`), that name and the type's own
+/// (`Main$$Lambda/MainSupplierLambdaInRun2`).
+pub(super) fn profile_names(class: &Class) -> Vec<Option<String>> {
+    let binary: Vec<Option<String>> = (0..class.types.len())
+        .map(|t| class.array_of(t).is_none().then(|| plain_binary_name(class, t)))
+        .collect();
+    let mut shared: HashMap<&str, usize> = HashMap::new();
+    for name in binary.iter().flatten() {
+        *shared.entry(name).or_default() += 1;
+    }
+    let unique = |t: usize, name: &String| match shared[name.as_str()] {
+        1 => name.clone(),
+        _ => format!("{name}/{}", class.types[t].name),
+    };
+    binary.iter().enumerate().map(|(t, name)| name.as_ref().map(|name| unique(t, name))).collect()
+}
+
+pub(super) fn plain_binary_name(class: &Class, t: usize) -> String {
+    let decl = &class.types[t];
+    if decl.kind == TypeKind::Runtime {
+        return decl.name.clone();
+    }
+    if let Some((binary, _)) = decl.origin.java_names() {
+        return binary.to_string();
+    }
+    if crate::lower::is_standard(&decl.name) {
+        return crate::lower::standard_binary_name(&decl.name);
+    }
+    // The types of `java.lang` that lowering adds are named without their package.
+    if decl.package.is_empty()
+        && matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD)
+    {
+        return format!("java.lang.{}", decl.name);
+    }
+    match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
+        Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
+        _ => decl.name.replace('.', "$"),
+    }
+}
+
 /// The interfaces of the constant descriptions that the runtime's strings and boxes implement,
 /// and the class of `describeConstable`'s result (`constant_desc_arm`).
 const CONSTABLE: &str = "java.lang.constant.Constable";
@@ -139,23 +183,37 @@ const TWO_SHARE: f64 = 0.85;
 /// The classes that each call mostly saw in the counts of a profiled run (`java::count_dispatch`)
 /// in the file `JAVA_TO_RUST_DISPATCH_PROFILE` names, by the call's key (`Gen::profile_key`):
 /// the one class of `ONE_SHARE` of its calls, else the two of `TWO_SHARE`, for calls made at least
-/// `PROFILED_CALLS` times. The counts name classes by their numbers (`class_numbers`, `numbers`),
-/// which a translation of the same program gives them again.
-pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[usize]>> {
+/// `PROFILED_CALLS` times. The counts name classes by their binary names (`plain_binary_name`),
+/// which any translation of the program gives them, where the translation that counted could name
+/// them (`DISPATCH_CLASS_NAMES`), else by their numbers (`class_numbers`, `numbers`), which only a
+/// translation that numbers the program's classes the same gives them again: a change of the
+/// translator that adds or drops a class moves most numbers.
+pub(super) fn profiled_sets(class: &Class, numbers: &[u16]) -> HashMap<String, std::sync::Arc<[usize]>> {
     let Some(path) = std::env::var_os("JAVA_TO_RUST_DISPATCH_PROFILE") else { return HashMap::new() };
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("the dispatch profile {}: {e}", std::path::Path::new(&path).display()));
     let class_of: HashMap<u16, usize> = numbers.iter().enumerate().map(|(t, &n)| (n, t)).collect();
+    // A name that two types share names neither.
+    let mut named: HashMap<String, Option<usize>> = HashMap::new();
+    for (t, name) in profile_names(class).into_iter().enumerate() {
+        if let Some(name) = name {
+            named.entry(name).and_modify(|t| *t = None).or_insert(Some(t));
+        }
+    }
+    let class_named = |text: &str| match text.parse::<u16>() {
+        Ok(number) => class_of.get(&number).copied(),
+        Err(_) => named.get(text).copied().flatten(),
+    };
     let mut sets = HashMap::new();
     for line in text.lines() {
         let Some((key, counts)) = line.split_once('\t') else { continue };
         let mut by_class: BTreeMap<usize, u64> = BTreeMap::new();
         let mut total = 0;
         for item in counts.split_whitespace() {
-            let Some((class, n)) = item.split_once(':') else { continue };
+            let Some((class, n)) = item.rsplit_once(':') else { continue };
             let n: u64 = n.parse().unwrap_or(0);
             total += n;
-            if let Some(&c) = class.parse().ok().and_then(|number: u16| class_of.get(&number)) {
+            if let Some(c) = class_named(class) {
                 *by_class.entry(c).or_default() += n;
             }
         }
@@ -357,6 +415,11 @@ pub(super) enum Narrowing {
 impl<'a> Gen<'a> {
     /// Records that the code uses an item of an enum (and so the enum).
     pub(super) fn need(&self, need: Need) {
+        // The one body that an open `Among` falls back to, found before `needs` is borrowed.
+        let among_body = match need {
+            Need::Among(t, group, _, _, false) => self.group_body(t, group),
+            _ => None,
+        };
         let mut needs = self.needs.borrow_mut();
         match need {
             Need::Base(t)
@@ -389,7 +452,10 @@ impl<'a> Gen<'a> {
             Need::Among(t, group, _, _, closed) => {
                 needs.insert(Need::Enum(t));
                 if !closed {
-                    needs.insert(Need::Dispatch(t, group));
+                    match among_body {
+                        Some(only) => needs.insert(Need::Body(only)),
+                        None => needs.insert(Need::Dispatch(t, group)),
+                    };
                 }
             }
             Need::Body(i) | Need::BodyFor(i, _) => {
@@ -843,28 +909,9 @@ impl<'a> Gen<'a> {
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
     pub(super) fn binary_name(&self, t: usize) -> String {
-        let decl = &self.class.types[t];
-        if let Some(array) = self.class.array_of(t) {
-            return self.descriptor(array);
-        }
-        if decl.kind == TypeKind::Runtime {
-            return decl.name.clone();
-        }
-        if let Some((binary, _)) = decl.origin.java_names() {
-            return binary.to_string();
-        }
-        if crate::lower::is_standard(&decl.name) {
-            return crate::lower::standard_binary_name(&decl.name);
-        }
-        // The types of `java.lang` that lowering adds are named without their package.
-        if decl.package.is_empty()
-            && matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD)
-        {
-            return format!("java.lang.{}", decl.name);
-        }
-        match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
-            Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
-            _ => decl.name.replace('.', "$"),
+        match self.class.array_of(t) {
+            Some(array) => self.descriptor(array),
+            None => plain_binary_name(self.class, t),
         }
     }
 
@@ -2002,9 +2049,15 @@ impl<'a> Gen<'a> {
             return call;
         }
         let group = self.class.hierarchy.group_id(resolved);
-        let among = self.closed_among(t, receiver, resolved);
+        // A call that every class runs the same way, one fields body reached through `base()`
+        // (`fields_call`), tests no class first: its arms would all run that body.
+        let among = self
+            .closed_among(t, receiver, resolved)
+            .filter(|_| self.fields_body(t, resolved, &self.enum_variants(t)).is_none());
         let name = match among {
-            Some((key, closed)) if self.enum_body(t, resolved).is_none() => {
+            Some((key, closed))
+                if self.enum_body(t, resolved).is_none() || self.copies_among(t, key, resolved) =>
+            {
                 self.need(Need::Among(t, group, key, None, closed));
                 among_name(&self.group_names[&group], key, closed, None)
             }
@@ -2023,7 +2076,8 @@ impl<'a> Gen<'a> {
             let call = self.enum_fn_call(t, &name, "j2r_receiver", &args);
             return Code::atom(format!(
                 "{{ let j2r_receiver = {obj}; static COUNT: java::DispatchCount = java::DispatchCount::new({key:?}); \
-                 java::count_dispatch(&COUNT, j2r_receiver.0.tag()); {call} }}"
+                 java::count_dispatch(&COUNT, j2r_receiver.0.tag(), &crate::{}); {call} }}",
+                super::class_values::DISPATCH_NAMES
             ));
         }
         Code::atom(self.enum_fn_call(t, &name, &obj, &args))
@@ -2111,6 +2165,17 @@ impl<'a> Gen<'a> {
         let closed =
             !self.class.receivers.contains_key(&receiver.id) || self.receivers_listed(t, resolved, group);
         Some((receiver_key(set), closed))
+    }
+
+    /// Whether a call of `resolved`, whose one body every object of the enum of `t` runs
+    /// (`enum_body`), on receivers of the classes of `key`, runs copies of the body for some of
+    /// them (`copyable`): a dispatcher among those classes then runs each its copy, whose calls
+    /// on `this` are direct, where the body would dispatch them among every class that runs it.
+    fn copies_among(&self, t: usize, key: u64, resolved: usize) -> bool {
+        let Some(only) = self.enum_body(t, resolved) else { return false };
+        let set = &self.receiver_sets[&key];
+        let among = set.iter().filter(|&&c| self.is_enum_variant(t, c)).count();
+        among <= BODY_FOR_CLASSES && set.iter().any(|&c| self.is_enum_variant(t, c) && self.copyable(only, c))
     }
 
     /// The key of the classes that `receiver`, a value of the enum of `t`, may be, where the
@@ -2224,8 +2289,23 @@ impl<'a> Gen<'a> {
     /// among a few classes (`Need::Among`) or of a copy copies the body whatever the number of
     /// classes that run it, as only those few get copies: the server's `LevelChunk`, one of the
     /// many classes that run `LevelHeightAccessor`'s `getSectionYFromSectionIndex`, then runs its
-    /// copies down to `getMinY()`, where the body dispatched again among all of them.
+    /// copies down to `getMinY()`, where the body dispatched again among all of them. A call
+    /// on an object whose class is known (`receiver_class`) runs the copy too.
     pub(super) fn body_for(&self, i: usize, c: usize) -> bool {
+        if !self.copyable(i, c) {
+            return false;
+        }
+        let h = &self.class.hierarchy;
+        let Home::Enum(d) = self.homes[i] else { return false };
+        let runners =
+            self.enum_variants(d).into_iter().filter(|&v| h.implementation(i, v) == Some(i)).count();
+        runners <= BODY_FOR_CLASSES || self.few_arms
+    }
+
+    /// Whether body `i` may be copied for class `c` (`body_for`), whatever the number of classes
+    /// that run it: a small body of one expression, of values, operators, fields, calls of static
+    /// methods and calls on `this`, with one call on `this` at least.
+    pub(super) fn copyable(&self, i: usize, c: usize) -> bool {
         let m = &self.class.methods[i];
         let Home::Enum(d) = self.homes[i] else { return false };
         if m.is_static
@@ -2248,6 +2328,9 @@ impl<'a> Gen<'a> {
                 ExprKind::MethodCall { receiver, is_super: false, .. } => {
                     on_this |= matches!(receiver.kind, ExprKind::This);
                 }
+                // A static helper of the body (`SectionPos.blockToSectionCoord(y)`) runs the same
+                // in the copy.
+                ExprKind::Call { resolved: Some(r), .. } if self.class.methods[*r].is_static => {}
                 ExprKind::Int(_)
                 | ExprKind::Long(_)
                 | ExprKind::Double(_)
@@ -2266,13 +2349,44 @@ impl<'a> Gen<'a> {
                 _ => plain = false,
             }
         });
-        if !plain || !on_this || nodes > BODY_FOR_NODES {
-            return false;
+        plain && on_this && nodes <= BODY_FOR_NODES
+    }
+
+    /// The one class that the objects of `receiver` have, where the code knows it: `this` in a
+    /// copy of a body written for one class (`body_for`), an object of a class whose struct holds
+    /// only its own objects, or a receiver that the points-to facts give one class
+    /// (`Class::receivers`).
+    fn receiver_class(&self, receiver: &Expr) -> Option<usize> {
+        let receiver = self.peel(receiver);
+        if matches!(receiver.kind, ExprKind::This)
+            && let Some(c) = self.this_class
+        {
+            return Some(c);
         }
+        if let Some(set) = self.class.receivers.get(&receiver.id)
+            && let [c] = set[..]
+        {
+            return Some(c);
+        }
+        if self.enum_of(receiver).is_none() {
+            // An enum's constant with a body is of the body's class.
+            return self.struct_class(receiver).filter(|&c| !self.has_bodies(c));
+        }
+        None
+    }
+
+    /// The body that every object of the enum of `t` runs for a call of override group `group`
+    /// (`enum_body`), of the group's method declared nearest above the type.
+    fn group_body(&self, t: usize, group: usize) -> Option<usize> {
         let h = &self.class.hierarchy;
-        let runners =
-            self.enum_variants(d).into_iter().filter(|&v| h.implementation(i, v) == Some(i)).count();
-        runners <= BODY_FOR_CLASSES || self.few_arms
+        let mut chain = vec![t];
+        chain.extend(h.ancestors(t));
+        let members = h.group(group);
+        let r = chain
+            .iter()
+            .find_map(|&a| members.iter().copied().find(|&m| self.class.methods[m].class == a))
+            .or_else(|| members.iter().copied().find(|m| h.is_subtype(t, self.class.methods[*m].class)))?;
+        self.enum_body(t, r)
     }
 
     /// The name of the copy of body `i` for class `c` (`body_for`): the body's, then `on_` and
@@ -2413,10 +2527,23 @@ impl<'a> Gen<'a> {
     ) -> Option<Code> {
         match self.homes[index] {
             Home::Enum(d) => {
-                self.need(Need::Body(index));
+                // On an object whose class is known, a small body runs as its copy for the class,
+                // whose calls on `this` run that class's methods directly (`body_for`).
+                // A plain call (`called_name`) calls the copy's plain body.
+                let name = match self.receiver_class(receiver).filter(|&c| self.is_enum_variant(d, c)) {
+                    Some(c) if self.copyable(index, c) => {
+                        self.need(Need::BodyFor(index, c));
+                        let plain = if self.plain_call == Some(index) { super::PLAIN_BODY } else { "" };
+                        format!("{}{plain}", self.body_for_name(index, c))
+                    }
+                    _ => {
+                        self.need(Need::Body(index));
+                        self.called_name(index)
+                    }
+                };
                 let obj = self.thin_as_enum(d, receiver);
                 let args = self.call_args(index, args).join(", ");
-                Some(Code::atom(self.enum_fn_call(d, &self.called_name(index), &obj, &args)))
+                Some(Code::atom(self.enum_fn_call(d, &name, &obj, &args)))
             }
             Home::Fields(d) => {
                 let t = self.enum_of(receiver)?;
@@ -3103,7 +3230,12 @@ impl<'a> Gen<'a> {
             return;
         }
         let closed = among.is_some_and(|(_, closed)| closed);
-        let otherwise = among.filter(|_| !closed).map(|_| self.enum_fn_call(t, general, "this", args));
+        // Any other class runs the whole dispatcher, or the one body that every class runs.
+        let general = match self.enum_body(t, r) {
+            Some(only) if among.is_some() => self.fn_names[only].clone(),
+            _ => general.to_string(),
+        };
+        let otherwise = among.filter(|_| !closed).map(|_| self.enum_fn_call(t, &general, "this", args));
         let numbers = match among.is_some() && !closed {
             true => self.enum_variants(t),
             false => variants.to_vec(),
@@ -3147,6 +3279,17 @@ impl<'a> Gen<'a> {
     /// fields struct at or above the one `base()` lends, and `base()` reads that with no `match`
     /// (`base_fn`): `this.base().base.get_name()`, one call whatever the object's class.
     fn fields_call(&mut self, t: usize, r: usize, variants: &[usize], args: &str) -> Option<String> {
+        let (i, d) = self.fields_body(t, r, variants)?;
+        let root = self.fields_root(t)?;
+        self.need(Need::Base(t));
+        let path = hierarchy::base_path(self.facts, self.class, root, d);
+        let call = format!("this.base().{path}{}({args})", self.fn_names[i]);
+        Some(self.covariant_ret(i, r, call))
+    }
+
+    /// The body that every class of `variants` runs for method `r` of the enum of `t`, and the
+    /// fields struct it is emitted on, where `fields_call` calls it through `base()`.
+    fn fields_body(&self, t: usize, r: usize, variants: &[usize]) -> Option<(usize, usize)> {
         let h = &self.class.hierarchy;
         let i = h.implementation(r, *variants.first()?)?;
         let Home::Fields(d) = self.homes[i] else { return None };
@@ -3154,13 +3297,7 @@ impl<'a> Gen<'a> {
         let direct = self.plain_enum(t)
             && h.is_subtype(root, d)
             && variants.iter().all(|&c| h.implementation(r, c) == Some(i) && self.object_variant(c));
-        if !direct {
-            return None;
-        }
-        self.need(Need::Base(t));
-        let path = hierarchy::base_path(self.facts, self.class, root, d);
-        let call = format!("this.base().{path}{}({args})", self.fn_names[i]);
-        Some(self.covariant_ret(i, r, call))
+        direct.then_some((i, d))
     }
 
     /// The arm for a value of class `c` bound to `o` that runs no method of the program for

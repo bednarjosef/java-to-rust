@@ -584,6 +584,7 @@ impl<'a> Gen<'a> {
         let (mut text, names) = self.class_value_constants();
         text.push_str(&classes);
         text.push_str(&table);
+        text.push_str(&self.dispatch_names_table());
         if !text.is_empty() {
             let root = &mut tree.modules[0];
             if !root.uses.iter().any(|group| group.contains("use java_runtime as java;")) {

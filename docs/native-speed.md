@@ -376,18 +376,25 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   of each receiver (`java::count_dispatch`), and writes the counts to the file
   `JAVA_DISPATCH_COUNTS` names when the program exits: a line per call, keyed by the method it
   is in, its place in the source and the method called (`codegen::dispatch::profile_key`), with
-  the counts by class number. A translation made with `JAVA_TO_RUST_DISPATCH_PROFILE` naming
-  that file gives each call that saw one class in 75% of at least 1000 calls, or two in 85%, the
-  inlined dispatcher among those classes (`_among_`): a test of the class number and a direct
-  call the compiler can inline, with the whole dispatcher for any other class, so a profile
-  that no longer fits the program costs speed,
-  never correctness. Class numbers are the same in any translation of the same program
-  (`dispatch::class_numbers`), so the counts name classes by them. Where the profiled class
-  runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,
+  the counts by class, each named by its binary name (`Main$Square:1900`), followed by the
+  type's own name where several types share one, as a class's lambdas do
+  (`dispatch::profile_names`), from a table that only a counting translation has
+  (`DISPATCH_CLASS_NAMES`). A translation made with
+  `JAVA_TO_RUST_DISPATCH_PROFILE` naming that file gives each call that saw one class in 75% of
+  at least 1000 calls, or two in 85%, the inlined dispatcher among those classes (`_among_`): a
+  test of the class number and a direct call the compiler can inline, with the whole dispatcher
+  for any other class, so a profile that no longer fits the program costs speed, never
+  correctness. Names keep a profile valid across translator changes: class numbers
+  (`dispatch::class_numbers`) move whenever the set of translated classes changes, and a profile
+  keyed by them, which is still read, fits only the translation that counted it. Where the
+  profiled class runs a factory (`iterator()`), its object can go on the caller's stack (docs/collector.md,
   "Objects on the stack"): the iterator of a loop over a list that is nearly always an
   `ArrayList` is then never allocated, as a JIT's escape analysis would do after inlining.
   A cast that is the receiver of such a call (`((List) entry.getValue()).iterator()`) tests for
-  the call's classes first (docs/object-model.md, 1.5).
+  the call's classes first (docs/object-model.md, 1.5). A call that every class runs the same
+  way, one method of their base class's fields reached through `base()` (the server's lighting
+  engine's private `calculatePriority`), gets no such dispatcher, whose arms would all run that
+  method: 68 of the server's 1,094 were of that kind.
 - **Checks removed**: null checks on never-null references, bounds checks inside proven ranges,
   write barriers on young objects, monitors on objects that never reach another thread.
 - **Smaller objects**: unused fields removed, integers proven small stored as `u8` or `u16`,

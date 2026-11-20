@@ -169,9 +169,10 @@ Naming:
 - An inherited body that a subclass overrides is emitted under `<m>_in_<declaring class>`
   (`to_string_in_shape`, `withdraw_in_account`) so that `super` calls reach it; a method that
   nothing below overrides keeps its own name.
-- A body on an enum that is one small expression (at most 12, of plain kinds) with a call on
-  `this`, which at most four classes run, such as the Minecraft server's `LevelReader.getMinY()`, `dimensionType().minY()`, has
-  a copy for each class whose dispatcher arm calls it: `<body>__on_<class>`
+- A body on an enum that is one small expression (at most 12 nodes, of values, operators,
+  fields, calls of static methods and calls on `this`) with a call on `this`, which at most four
+  classes run, such as the Minecraft server's `LevelReader.getMinY()`, `dimensionType().minY()`,
+  has a copy for each class whose dispatcher arm calls it: `<body>__on_<class>`
   (`Reader__min_y_in_reader__on_level`, with the class number where two classes of the enum
   share a name), which the arm calls instead (`Need::BodyFor`, `Gen::body_for`). In the copy a
   call on `this` is what the dispatcher's arm for the class runs, not a dispatch. With the
@@ -180,7 +181,18 @@ Naming:
   four classes (`Need::Among`) and of a copy get copies whatever the number of classes that run
   the body, as only their few classes do: the server's random-tick loop asks its `LevelChunk`
   for `getSectionYFromSectionIndex`, a default body of `LevelHeightAccessor` that many classes
-  run, and through the copies of it and of `getMinSectionY()` reaches `getMinY()` directly.
+  run, and through the copies of it and of `getSectionIndex()` (which calls the static
+  `SectionPos.blockToSectionCoord`) reaches `getMinY()` directly. Three more calls run copies
+  (`Gen::copyable`, the shape rules without the count of classes):
+  - a call of an inherited body on an object whose class the code knows (`receiver_class`: a
+    struct of one class, `this` in a copy, a receiver the points-to facts give one class) calls
+    that class's copy, as the server's `ServerLevel.isInValidBounds` does for
+    `isInsideBuildHeight`;
+  - a call of a default method that every class of the enum runs, on receivers of at most four
+    of its classes, dispatches among those to their copies (`copies_among`), where it called
+    the one body, whose calls on `this` dispatched among every class;
+  - a dispatcher among a few classes that is open, for receivers the facts don't bound, sends
+    any other class to that one body, not to the whole dispatcher.
 - Instance methods are named once per override group within the class trees the group reaches,
   so every implementation has the name its callers use; overload suffixes count the groups of a
   name (`codegen/names.rs`). A type also has its interfaces' methods, whose trees are their

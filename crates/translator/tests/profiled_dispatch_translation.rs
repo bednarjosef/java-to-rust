@@ -117,6 +117,33 @@ const HEIGHTS: &str = "public class Main {
     }
 }";
 
+const GRAPHS: &str = "public class Main {
+    abstract static class Graph {
+        final int levels; Graph(int levels) { this.levels = levels; }
+        abstract boolean source(long n);
+        private int priority(int a, int b) { return Math.min(Math.min(a, b), levels - 1); }
+        int check(long n, int a, int b) { return source(n) ? 0 : priority(a, b); }
+    }
+    static final class Tickets extends Graph { Tickets() { super(8); } boolean source(long n) { return n == 7; } }
+    static final class Sections extends Graph { Sections() { super(16); } boolean source(long n) { return n < 0; } }
+    static final class Chunks extends Graph { Chunks() { super(32); } boolean source(long n) { return false; } }
+    public static void main(String[] args) {
+        Graph[] gs = { new Tickets(), new Sections(), new Chunks() };
+        int sum = 0;
+        for (int i = 0; i < 30; i++) sum += gs[i % 10 == 0 ? 1 + i % 2 : 0].check(i, i % 5, i % 9);
+        System.out.println(sum);
+    }
+}";
+
+const LAMBDAS: &str = "public class Main {
+    static int run(java.util.function.IntSupplier s) { return s.getAsInt(); }
+    public static void main(String[] args) {
+        int n = 0;
+        for (int i = 0; i < 3; i++) { n += run(() -> 1) + run(() -> 2); }
+        System.out.println(n);
+    }
+}";
+
 const CASTS: &str = "public class Main {
     interface Shape { int area(); }
     static final class Square implements Shape {
@@ -183,7 +210,11 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     );
     assert_contains(
         &counted,
-        &["java::count_dispatch(&COUNT, j2r_receiver.0.tag()); MainShape__area(j2r_receiver)"],
+        &[
+            "java::count_dispatch(&COUNT, j2r_receiver.0.tag(), &crate::DISPATCH_CLASS_NAMES); MainShape__area(j2r_receiver)",
+            "static DISPATCH_CLASS_NAMES: [&str; ",
+            "\"Main$Square\",",
+        ],
     );
     // The class number of `Square`, from its arm in the dispatcher.
     let arm = counted.find(" => { let o: &Arc<MainSquare>").expect("an arm for `Square`");
@@ -309,4 +340,37 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
             "MainShape__area_among_",
         ],
     );
+
+    // A profile that names the classes, as the counts of a translation with the names table do,
+    // fits a translation that numbers them differently.
+    let profiled = translate_profiled(SHAPES, "Main.total/1@9:39#area\tMain$Square:1900 Main$Rect:100 *:0\n");
+    let among = profiled.find("fn MainShape__area_among_").expect("a dispatcher among the named class");
+    let end = among + profiled[among..].find("\n}").unwrap();
+    assert_contains(&profiled[among..end], &["let o: &Arc<MainSquare>"]);
+
+    // A call that every class runs the same way, a private method of their base class's fields,
+    // tests for no class first, where the virtual call beside it does.
+    let counted = counted_of(GRAPHS);
+    let (source, priority) = (count_key(&counted, "#source"), count_key(&counted, "#priority"));
+    let tickets = class_number(&counted, "MainTickets");
+    let profiled = translate_profiled(
+        GRAPHS,
+        &format!("{source}\t{tickets}:2700 *:300\n{priority}\t{tickets}:2700 *:300\n"),
+    );
+    assert_contains(&profiled, &["MainGraph__source_among_", "MainGraph__priority(this, a, b)"]);
+    assert!(!profiled.contains("MainGraph__priority_among_"), "{profiled}");
+
+    shared_binary_names_are_told_apart();
+}
+
+/// Types that share a binary name have their own names in a profile: both lambdas are
+/// `Main$$Lambda` to Java, and the counts name each by its own type too.
+fn shared_binary_names_are_told_apart() {
+    let counted = counted_of(LAMBDAS);
+    let names = counted.find("static DISPATCH_CLASS_NAMES").expect("the names table");
+    let names = &counted[names..names + counted[names..].find("];").unwrap()];
+    let lambdas: Vec<&str> = names.lines().filter(|l| l.contains("Main$$Lambda/")).collect();
+    assert_eq!(lambdas.len(), 2, "{names}");
+    assert_ne!(lambdas[0], lambdas[1]);
+    assert!(!names.contains("\"Main$$Lambda\""), "{names}");
 }
