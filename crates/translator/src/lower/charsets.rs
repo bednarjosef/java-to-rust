@@ -55,7 +55,7 @@ fn standard_class(name: &str) -> Option<CharsetOp> {
 }
 
 /// Whether `name` is the type of a charset: `Charset` or the class of a standard charset.
-pub(super) fn is_charset_type(name: &str) -> bool {
+pub fn is_charset_type(name: &str) -> bool {
     name == CHARSET || standard_class(name).is_some()
 }
 
