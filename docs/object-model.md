@@ -559,8 +559,11 @@ classes is never a string or a box, because its Rust type holds none. What the a
 not follow (a library call's result, the parameters of `equals` or `compareTo` that the runtime
 may call) may be anything. Where comparing the values gives Java's answer, they are compared:
 
-- the shortcut `a == b || a.equals(b)` (also with an assignment in an operand, as
-  `HashMap.getNode` writes it), since the result is `equals`'s either way;
+- the shortcut `a == b || a.equals(b)`, since the result is `equals`'s either way. An operand
+  may be a local, an assignment to one (`(k = first.key) == key`, as `HashMap.getNode` writes
+  it), or a field of `this` or of a local (`e.key == key || key.equals(e.key)`); the `equals` may
+  be in any later operand of the chain of `||` (`!matchValue || (v = node.value) == value ||
+  (value != null && value.equals(v))`), and its negation `a != b && .. !a.equals(b)` counts too;
 - in `TreeMap`'s own code, a comparison of two keys of its entries (or of a field that holds
   only one, `null` or a sentinel) compares by value. The keys of a sorted map are distinct under
   its comparator, and the translation's comparators see strings and boxes only by value, so two

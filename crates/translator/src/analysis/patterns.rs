@@ -330,10 +330,23 @@ fn shortcut(e: &Expr) -> Vec<ExprId> {
         let mut equals = false;
         for r in &operands[i + 1..] {
             visit_expr(r, &mut |x| {
-                if let ExprKind::MethodCall { receiver, name, args, .. } = &x.kind
+                // A call whose arguments lowering computes first reads them from held locals:
+                // `key.equals(e.key)` is `{ Object argument$0 = e.key; yield key.equals(argument$0); }`
+                // (`lower::ordered_call`), and the local holds what the operand reads.
+                let (call, held) = match crate::lower::ordered_call(x) {
+                    Some(call) => (call, held_values(x)),
+                    None => (x, Vec::new()),
+                };
+                let read = |e: &Expr| match &peel(e).kind {
+                    ExprKind::Var(n) if crate::lower::held_local(n) => {
+                        held.iter().find(|(h, _)| *h == n.as_str()).and_then(|(_, init)| compared(init))
+                    }
+                    _ => compared(e),
+                };
+                if let ExprKind::MethodCall { receiver, name, args, .. } = &call.kind
                     && name == "equals"
-                    && let (Some(x), [arg]) = (compared(receiver), &args[..])
-                    && let Some(y) = compared(arg)
+                    && let (Some(x), [arg]) = (read(receiver), &args[..])
+                    && let Some(y) = read(arg)
                 {
                     equals |= (x == a && y == b) || (x == b && y == a);
                 }
@@ -344,6 +357,20 @@ fn shortcut(e: &Expr) -> Vec<ExprId> {
         }
     }
     found
+}
+
+/// The locals that the block of an ordered call (`lower::ordered_call`) computes first, with the
+/// value each holds.
+fn held_values(e: &Expr) -> Vec<(&str, &Expr)> {
+    let ExprKind::Switch { cases, .. } = &e.kind else { return Vec::new() };
+    cases
+        .iter()
+        .flat_map(|case| &case.body)
+        .filter_map(|s| match s {
+            Stmt::Local { name, init: Some(init), .. } => Some((name.as_str(), init)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The operands of the chain of `op` that `e` is, left to right.
@@ -358,15 +385,18 @@ fn chain<'e>(e: &'e Expr, op: BinOp, operands: &mut Vec<&'e Expr>) {
 }
 
 /// What an operand of the shortcut's `==` reads: a variable (or an assignment to one), or a field
-/// of `this` (`this.name`), as `ConcurrentHashMap`'s entries compare `k == key || k.equals(key)`.
+/// of `this` or of a local (`this.name`, `e.key`), as `ConcurrentHashMap`'s entries compare
+/// `k == key || k.equals(key)` and `HashMap`'s bins `e.key == key || key.equals(e.key)`.
 fn compared(e: &Expr) -> Option<String> {
     match &peel(e).kind {
         ExprKind::Var(name) | ExprKind::Assign { op: None, target: Place::Var(name), .. } => {
             Some(name.clone())
         }
-        ExprKind::Field { object, name } if matches!(object.kind, ExprKind::This) => {
-            Some(format!("this.{name}"))
-        }
+        ExprKind::Field { object, name } => match &peel(object).kind {
+            ExprKind::This => Some(format!("this.{name}")),
+            ExprKind::Var(object) => Some(format!("{object}.{name}")),
+            _ => None,
+        },
         _ => None,
     }
 }
