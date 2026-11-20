@@ -199,8 +199,8 @@ Design: [object-model.md](object-model.md).
   interface that strings and boxes implement (`Serializable`, `Constable`, `ConstantDesc`) may
   be tested for a string or a box.
 - **`Object`** is an enum with a variant per class of the program whose values become `Object`s,
-  plus strings, boxes, arrays, builders and class values (`Object::String(..)`,
-  `Object::Integer(5)`, `Object::IntArray(..)`). `equals`/`hashCode` are the program's where
+  plus strings, boxes, arrays, builders and class values (`ObjectView::String(..)`,
+  `ObjectView::Integer(..)`, `ObjectView::IntArray(..)`). `equals`/`hashCode` are the program's where
   defined, otherwise identity for objects and value for strings and boxes. Default `toString`
   prints the binary name and hash code (`Point@1b6d3586`). `new Object()` is `PlainObject`.
   `==` between two `Object`s that may both be strings or boxes compares them at run time

@@ -1422,8 +1422,8 @@ impl<'a> Gen<'a> {
                     self.need(Need::Convert(s, t));
                     Some(format!("{handle}.{}()", self.to_name(t)))
                 }
-                (None, Some(c)) => Some(match self.variant_of(t, c) {
-                    Some(variant) => format!("{variant}({handle}.clone())"),
+                (None, Some(c)) => Some(match self.variant_of(t, c, &format!("{handle}.clone()")) {
+                    Some(variant) => variant,
                     // No object of the class is created (none is a value of the enum), so the
                     // call never runs, as `as_enum` writes it.
                     None => {
@@ -2007,7 +2007,7 @@ impl<'a> Gen<'a> {
             object
         };
         Code::atom(match rep {
-            Some(t) => format!("{}({object})", self.variant(t, c)),
+            Some(t) => self.variant(t, c, &object),
             None => object,
         })
     }

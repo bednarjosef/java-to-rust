@@ -15,9 +15,10 @@ possible classes are known and dispatch can be a `match`.
    fields is emitted once on the fields struct, and an enum needs one `base()` accessor rather
    than one per field.
 2. **A type that objects of several concrete classes can be is an eight-byte reference named
-   after the Java type**, a `java::Thin` holding the class's number and the object's handle,
-   with a constructor per class whose objects become values of the type (`Base::Circle(o)`)
-   and a *view*: an enum with one variant per such class that holds the class's object
+   after the Java type**, a `java::Thin` holding the class's number and the object's handle
+   (`Base(java::Thin::pointer::<Arc<RefCell<Circle>>>(2, o))` makes one), and a *view*: an
+   enum with one variant per class whose objects become values of the type, holding the class's
+   object
    (`Arc<RefCell<C>>`, or `Arc<C>` when immutable). The code calls such a type and its view
    "the enum" of the type. A type with one such class is that class's object, with no enum.
    Enums are flat: every variant is a concrete class, never another enum, so a call through an
@@ -28,7 +29,8 @@ possible classes are known and dispatch can be a `match`.
    class's `impl` (an *object-level* method).
 4. **Conversions are explicit in the tree.** Lowering inserts a `Cast` at every implicit
    reference conversion, so the analyses see every upcast, and the generator writes
-   `Base::Circle(c)` (class to enum), `b.to_shape()` (enum to enum) or a checked downcast.
+   `Base(java::Thin::pointer::<..>(2, c))` (class to enum), `b.to_shape()` (enum to enum) or a
+   checked downcast.
 5. **`instanceof` is a test of the class's number** (`matches!(s.0.tag(), 2..=5)`): classes
    are numbered each before its subclasses, so the classes at or below a class are one range. A
    pattern variable is bound with a let chain, `if let`, `let .. else` or `is_some_and`.
@@ -250,8 +252,6 @@ struct Base(java::Thin);
 #[repr(u16)]
 enum BaseView { Circle(Arc<RefCell<Circle>>) = 2, Rect(Arc<RefCell<Rect>>) = 3 }
 impl Base {
-    fn Circle(o: Arc<RefCell<Circle>>) -> Base { Base(java::Thin::pointer(2, o)) }
-    fn Rect(o: Arc<RefCell<Rect>>) -> Base { Base(java::Thin::pointer(3, o)) }
     fn view(&self) -> BaseView {
         match self.0.tag() {
             2 => BaseView::Circle(unsafe { self.0.to_pointer() }),
@@ -294,12 +294,14 @@ Rules:
   `o.borrow_mut().m()`, `C::m(o, ..)`, `o.m()` for an immutable class). When every variant runs
   the same body emitted on the enum, the call names that body and no dispatcher is written. A
   dispatcher arm whose class runs a body emitted on the enum of a type below the enum's type
-  wraps the object in that type's enum (`Binary__eval(Binary::Add(o.clone()))`) rather than
-  converting the whole value.
-- A variant's constructor (`Base::Circle(o)`) is written only when code makes a value of that
-  variant: a class is a variant of the enum of every type above it, and most of those values are
-  never made (javac's translation makes 6,900 of its 11,700), while each constructor is a
-  function for rustc to check and to keep in the header crate's metadata.
+  wraps the object in that type's enum (`Binary(java::Thin::pointer::<..>(7, o.clone()))`)
+  rather than converting the whole value.
+- A value of a variant is made where the code needs it, as the class's number with the object:
+  `Base(java::Thin::pointer::<Arc<RefCell<Circle>>>(2, o))`, or `Thin::value` for a class whose
+  objects are values (a box, a string without identity, an enum constant). The payload's type is
+  written out, so rustc checks that the object is of the class the number says. There is no
+  constructor function per variant (`Base::Circle(o)`): the Minecraft server makes values of
+  54,600 variants, and a function for each would be half of the header crate's functions.
 - An object is held by a `java::Arc`, a handle with no count (docs/collector.md). A value of an
   enum is that handle's address with the class's number in the top 16 bits (`java::Thin`,
   `crates/runtime/src/thin.rs`), and the value is `Copy` and eight bytes, `Option` of it too.
@@ -365,7 +367,8 @@ Rules:
 A field, local, parameter, array element or return value of a class type with an enum holds
 the enum; one with one concrete class holds that class's object. Nullness, `Option`, borrowed
 parameters (`&Base` for a parameter only used through) and moves follow the same rules as for
-any object type. A caller converts at the call: `total(&Base::Circle(c.clone()))`.
+any object type. A caller converts at the call:
+`total(&Base(java::Thin::pointer::<Arc<RefCell<Circle>>>(2, c.clone())))`.
 
 ### 1.4 Constructors and `super(...)`
 
@@ -663,12 +666,13 @@ implicit `super()`), so other programs translate without it.
 
 Runtime variants are types of kind `TypeKind::Runtime` beside it:
 
-- strings and the eight boxes hold the plain value (`Object::String(String)`,
-  `Object::Integer(i32)`); a primitive converted to `Object` becomes its box's variant;
+- strings and the eight boxes hold the plain value (`Object(java::Thin::value::<i32>(..))` for an
+  `Integer`, lent by the view as `ObjectView::Integer(&i32)`); a primitive converted to `Object`
+  becomes its box's variant;
 - an array type converted to `Object`, cast back or added to a string
   (`lower::object::note_object_array`, `concatenates_array`) gets a
   runtime class named after it (`int[]`), whose variant holds the shared `java::Array`
-  (`Object::IntArray(..)`), so the array keeps its identity: `==` and `equals` are `Arc::ptr_eq`,
+  (`ObjectView::IntArray(..)`), so the array keeps its identity: `==` and `equals` are `Arc::ptr_eq`,
   `hashCode` its identity hash, and it prints as Java's `[I@1b6d3586`. Arrays of a real generic's
   instantiation have no runtime class and are rejected;
 - a `StringBuilder` held as an `Object` holds the shared `java::StringBuilder` (a
@@ -1186,7 +1190,7 @@ nothing (slower, never wrong), so the scan is to be exact, not generous.
 - An interface is a type like any other: an enum over the classes whose objects flow into it,
   or that class's object when there is one implementing class.
 - An interface whose only implementor is a Java enum is still an enum with one variant
-  (`Coded::Color(Color)`), so that a value of a class type is always an object (`Option` for
+  (`CodedView::Color(Color)`), so that a value of a class type is always an object (`Option` for
   null, identity through the enum).
 - A Java enum implementing an interface is a variant holding the `Copy` constant: compared with
   `==`, shown through the enum's `Display`, converted with `*o`, its methods called as `o.m()`

@@ -285,7 +285,12 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     assert_contains(total, &["let slot_1 = java::Slot::<", "_on_stack_", ", &slot_1)"]);
     let among = profiled.find("fn MainBag__cursor_among_").expect("a dispatcher that passes the slot on");
     let end = among + profiled[among..].find("\n}").unwrap();
-    assert_contains(&profiled[among..end], &["MainArr__cursor_on_stack(MainArr::Arr(o.clone()), j2r_slot)"]);
+    assert_contains(
+        &profiled[among..end],
+        &[
+            "MainArr__cursor_on_stack(MainArr(java::Thin::pointer::<Arc<MainArrFields>>(2, o.clone())), j2r_slot)",
+        ],
+    );
     assert_contains(&profiled, &["fn MainArr__cursor_on_stack("]);
 
     // An object given to a call that mostly saw a class whose method keeps it nowhere starts in a

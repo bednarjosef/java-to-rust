@@ -46,7 +46,7 @@ fn a_lambda_is_a_variant_of_its_interface() {
             "fn apply(&self, a: i32, b: i32) -> i32 {\n        a + b\n    }",
             "OpLambdaInMain(Arc<OpLambdaInMain>) = 3,",
             "3 => { let o: &Arc<OpLambdaInMain> = &unsafe { this.0.to_pointer() }; o.apply(a, b) }",
-            "AOp::OpLambdaInMain({ static LAMBDA: java::StaticObject<OpLambdaInMain> = \
+            "AOp(java::Thin::pointer::<Arc<OpLambdaInMain>>(3, { static LAMBDA: java::StaticObject<OpLambdaInMain> = \
              java::StaticObject::new(OpLambdaInMain {}); LAMBDA.handle() })",
         ],
     );
@@ -97,8 +97,8 @@ fn a_generic_interfaces_closure_converts_its_arguments_and_its_result() {
     assert_contains(
         &rust,
         &[
-            "let square = |t: Object| -> Object {\n        let x: i32 = java::cast(&t, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE));\n        Object::Integer(x.wrapping_mul(x))\n    };",
-            "square(Object::Integer(7))",
+            "let square = |t: Object| -> Object {\n        let x: i32 = java::cast(&t, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE));\n        Object(java::Thin::value::<i32>(5, x.wrapping_mul(x)))\n    };",
+            "square(Object(java::Thin::value::<i32>(5, 7)))",
             "let show = |t: Object| {\n        let s_text = &java::cast(&t, |o| o.as_string(), &(\"java.lang.String\", java::BASE));\n        let s: java::Str<'_> = java::Str::of(s_text);\n        java::println!(\"{}\", java::string_length(s.as_text()));\n    };",
         ],
     );
@@ -124,7 +124,7 @@ fn a_lambda_that_returns_early_behind_a_bridge_is_a_closure_called_at_once() {
     assert_contains(
         &rust,
         &[
-            "Object::Integer((|x: i32| -> i32 {",
+            "Object(java::Thin::value::<i32>(4, (|x: i32| -> i32 {",
             "return x.wrapping_sub(4);",
             "})(java::cast(&t, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE))))",
         ],

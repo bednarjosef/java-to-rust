@@ -365,8 +365,7 @@ impl<'a> Gen<'a> {
             if element != row {
                 let object = self.enum_type(element).expect("`Object` is an enum");
                 let row = self.class.type_of(row).expect("rows that are `Object`s (see `lower::arrays`)");
-                let variant = self.variant_of(object, row).expect("a variant of `Object` for the rows");
-                text = format!("{variant}({text})");
+                text = self.variant_of(object, row, &text).expect("a variant of `Object` for the rows");
             }
             // The rows are `Some` where the element type is nullable, as the array they fill is.
             if self.nullable_element(element) {

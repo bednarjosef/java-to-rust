@@ -189,7 +189,7 @@ code is at most 48 tokens (`split.rs`, `small`; a `match` that passes a failure 
 nor `#[inline(never)]`, such as a getter, a buffer's `get`, `Mth.lerp` or a cast of an `Object`
 to a class (`Object::as_x`), keeps its code in the header, and so does one that the generator
 marked `#[inline]` itself: the check that a class is initialized (`init_x`, whose `init_x_slow`
-moves), a variant's constructor, the view of a type's enum. Both those the generator did not mark
+moves), the view of a type's enum. Both those the generator did not mark
 and the header's wrapper of each moved method are `#[cfg_attr(not(debug_assertions), inline)]`, so
 that an optimized build inlines them into the crates that call them: a wrapper becomes a direct
 call of the body crate's function, and a small function no call at all. A build at

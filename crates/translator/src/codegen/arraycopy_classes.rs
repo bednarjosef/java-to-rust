@@ -109,28 +109,28 @@ impl<'a> Gen<'a> {
                 .collect(),
         };
         let missing = self.runtime("not_translated");
-        cases
-            .into_iter()
-            .filter(|&(_, c)| self.class.hierarchy.is_subtype(c, d))
-            .map(|(pattern, c)| {
-                let pattern = if src_nullable { format!("Some({pattern})") } else { pattern };
-                let object = match self.rep(d) {
-                    hierarchy::Rep::Object(_) => "x.clone()".to_string(),
-                    hierarchy::Rep::Enum(t) if self.is_enum_variant(t, c) => {
-                        format!("{}(x.clone())", self.variant(t, c))
-                    }
-                    hierarchy::Rep::Enum(_) => {
-                        let (from, to) = (self.binary_name(c), self.binary_name(d));
-                        let pattern = pattern.replace("(x)", "(_)");
-                        return format!(
-                            "{pattern} => {missing}(\"`System.arraycopy` of a {from} into an array of {to}, which no {to} is elsewhere\"), "
-                        );
-                    }
-                };
-                let value = if dst_nullable { format!("Some({object})") } else { object };
-                format!("{pattern} => Ok({value}), ")
-            })
-            .collect()
+        let mut arms = Vec::new();
+        for (pattern, c) in cases {
+            if !self.class.hierarchy.is_subtype(c, d) {
+                continue;
+            }
+            let pattern = if src_nullable { format!("Some({pattern})") } else { pattern };
+            let object = match self.rep(d) {
+                hierarchy::Rep::Object(_) => "x.clone()".to_string(),
+                hierarchy::Rep::Enum(t) if self.is_enum_variant(t, c) => self.variant(t, c, "x.clone()"),
+                hierarchy::Rep::Enum(_) => {
+                    let (from, to) = (self.binary_name(c), self.binary_name(d));
+                    let pattern = pattern.replace("(x)", "(_)");
+                    arms.push(format!(
+                        "{pattern} => {missing}(\"`System.arraycopy` of a {from} into an array of {to}, which no {to} is elsewhere\"), "
+                    ));
+                    continue;
+                }
+            };
+            let value = if dst_nullable { format!("Some({object})") } else { object };
+            arms.push(format!("{pattern} => Ok({value}), "));
+        }
+        arms
     }
 
     /// The call that copies the elements of `src` into `dest` with the conversion `convert`: over
