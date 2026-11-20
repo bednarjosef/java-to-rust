@@ -768,6 +768,22 @@ fn arguments_that_read_the_receiver_are_plain_calls() {
 }
 
 #[test]
+fn a_pattern_variable_is_never_null_so_reading_it_needs_no_held_receiver() {
+    // `that` holds only the object that matched, so `that.k` cannot throw before the call on `k`
+    // looks at its receiver, and the call is a plain one.
+    let rust = translate(
+        "class K { boolean same(K o) { return this == o; } }
+        class T { K k; T(K k) { this.k = k; }
+            boolean matches(Object o) { return o instanceof T that && k.same(that.k); } }
+        class A { public static void main(String[] a) {
+            K k = new K();
+            System.out.println(new T(k).matches(new T(k)) + \" \" + new T(k).matches(k));
+        } }",
+    );
+    assert_lacks(&rust, &["receiver_"]);
+}
+
+#[test]
 fn to_string_is_a_method_that_printing_and_concatenation_call() {
     let rust = translate(
         "class P { int x; public String toString() { return \"P\" + x; } }

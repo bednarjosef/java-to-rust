@@ -184,9 +184,10 @@ struct Known {
 }
 
 /// The locals of `method` that are never null: each value it is given is a new object, a string
-/// literal, `this` or another such local, as in `P p = new P(); p.set(p.x + 1)`. A name that the
-/// method also gives a parameter, a loop's or a catch's variable or a pattern's is left out, as is
-/// one a compound assignment changes.
+/// literal, `this` or another such local, as in `P p = new P(); p.set(p.x + 1)`, and a pattern's
+/// variable (`o instanceof Tag t`) is given only the object it matched. A name that the method also
+/// gives a parameter or a loop's or a catch's variable is left out, as is one a compound assignment
+/// changes.
 fn non_null_locals(method: &Method) -> HashSet<String> {
     let mut values: std::collections::HashMap<String, Vec<&Expr>> = std::collections::HashMap::new();
     let mut other: HashSet<String> = method.params.iter().map(|p| p.name.clone()).collect();
@@ -198,8 +199,10 @@ fn non_null_locals(method: &Method) -> HashSet<String> {
                     ExprKind::Assign { op: None, target: Place::Var(v), value } => {
                         values.entry(v.clone()).or_default().push(value);
                     }
-                    ExprKind::Assign { target: Place::Var(v), .. }
-                    | ExprKind::InstanceOf { binding: Some(v), .. } => {
+                    ExprKind::InstanceOf { binding: Some(v), .. } => {
+                        values.entry(v.clone()).or_default();
+                    }
+                    ExprKind::Assign { target: Place::Var(v), .. } => {
                         other.insert(v.clone());
                     }
                     _ => {}
