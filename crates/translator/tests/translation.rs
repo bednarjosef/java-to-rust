@@ -768,6 +768,42 @@ fn arguments_that_read_the_receiver_are_plain_calls() {
 }
 
 #[test]
+fn elements_cast_back_from_an_object_array_are_compared_uncast() {
+    // `Key[]` is an `Object[]` once it is passed as one, and its reads are cast back to `Key`;
+    // javac casts neither operand of `==`, so the element's bits are compared as they are.
+    let program = |keys: &str| {
+        format!(
+            "interface Key {{}}
+            class P implements Key {{}}
+            class Q implements Key {{}}
+            class A {{
+                static int count(Object[] all) {{ return all.length; }}
+                static int index(Key[] keys, Key key) {{
+                    for (int i = 0; i < keys.length; i++) {{ if (keys[i] == key) return i; }}
+                    return -1;
+                }}
+                public static void main(String[] a) {{
+                    Key p = new P();
+                    Key[] keys = {keys};
+                    System.out.println(count(keys) + \" \" + index(keys, p));
+                }}
+            }}"
+        )
+    };
+    let index = |rust: &str| {
+        let index = rust.find("fn index(").expect("`index`");
+        rust[index..index + rust[index..].find("\n}").unwrap()].to_string()
+    };
+    let never_null = index(&translate(&program("{ p, new Q() }")));
+    assert_contains(&never_null, &["if (&keys[i as usize]).0 == key.0 {"]);
+    let with_null = index(&translate(&program("{ p, null, new Q() }")));
+    assert_contains(&with_null, &[".map(|o| o.0) == "]);
+    for index in [never_null, with_null] {
+        assert_lacks(&index, &["java::cast(", "as_key"]);
+    }
+}
+
+#[test]
 fn to_string_is_a_method_that_printing_and_concatenation_call() {
     let rust = translate(
         "class P { int x; public String toString() { return \"P\" + x; } }

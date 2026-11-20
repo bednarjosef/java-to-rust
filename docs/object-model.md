@@ -556,7 +556,10 @@ class with different bits call `eq_by_value`, which tests the class among those 
 (900 on the Minecraft server) and compares them, in a body crate of a split program
 (docs/several-crates.md), where the whole test was too large for the link's inlining. `==` on enum
 values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles
-keep `Arc::ptr_eq` and `java::same`.
+keep `Arc::ptr_eq` and `java::same`. An operand that erasure casts back from one enum to another
+(`Class::erased_casts`: an element of a `Property[]` that is an `Object[]`, or a generic member's
+value) is compared uncast, by its bits, where either side's enum compares all its variants by
+identity, as javac casts neither operand of `==`.
 
 A string or a box inside `Object` is a plain value whose identity the translation does not
 keep, so `==` between two `Object`s where both sides may be strings or boxes is
@@ -923,8 +926,8 @@ met as they would be translated then (`covariant::noted_later`), so one lowering
 them all. That includes the Rust generics the lowering failed, which the next one erases: an
 array of a generic class with type arguments (`Box<String>[]`) is `Box[]` once the class is
 erased, and noting such an array fails the class itself, whose objects would be `Object`s as its
-elements. Element reads get the checked cast back, a for-each casts each element,
-and a store converts to `Object`. Every other array keeps its exact type.
+elements. Element reads get the checked cast back (not an operand of `==`, section 1.6), a
+for-each casts each element, and a store converts to `Object`. Every other array keeps its exact type.
 
 Such an array carries the class it was made of (`java::ElementClass`, behind the array's handle
 next to its elements; every other array carries `None`, one word). Lowering notes the class of

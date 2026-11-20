@@ -192,6 +192,7 @@ pub fn lower(unit: &Value) -> Result<Class, Error> {
             object_rows: lowering.object_rows.take(),
             array_tests: lowering.array_tests.take(),
             volatile_elements: lowering.volatile_elements.take(),
+            erased_casts: lowering.erased_casts.take(),
             proxy_classes: Default::default(),
             receivers: Default::default(),
             reflection_table: lowering.reflection_layout.take(),

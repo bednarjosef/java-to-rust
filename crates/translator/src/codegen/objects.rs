@@ -1277,6 +1277,9 @@ impl<'a> Gen<'a> {
     /// `Rc::ptr_eq`, or `java::same` where either may be null; `java::same_object` on `Object`s
     /// that may both be strings or boxes (`Facts::identity_checks`).
     pub(super) fn identity(&mut self, id: ExprId, op: BinOp, l: &'a Expr, r: &'a Expr) -> Code {
+        if let Some(code) = self.erased_identity(id, op, l, r) {
+            return code;
+        }
         if self.facts.identity_checks.contains(&id)
             && self.enum_of(l).is_some()
             && self.enum_of(l) == self.enum_of(r)
@@ -1297,6 +1300,43 @@ impl<'a> Gen<'a> {
             format!("{pointer}::ptr_eq({a}, {b})")
         };
         if op == BinOp::Ne { Code::new(format!("!{same}"), UNARY) } else { Code::atom(same) }
+    }
+
+    /// `a == b` (expression `id`) where `a` or `b` is erasure's cast back from a value of one enum
+    /// to another (`Class::erased_casts`), as `StateHolder.valueIndex`'s `propertyKeys[i] ==
+    /// property` casts each element of an `Object[]` to `Property`: javac casts neither operand of
+    /// `==`, so neither is cast here, and the values' bits (`java::Thin`) are compared. That is
+    /// identity where either side's enum holds only values that are the same object exactly when
+    /// their bits are (`unequal_bits_tags`), as a value keeps its bits as a value of a supertype.
+    fn erased_identity(&mut self, id: ExprId, op: BinOp, l: &'a Expr, r: &'a Expr) -> Option<Code> {
+        let uncast = |g: &Self, e: &'a Expr| match &e.kind {
+            ExprKind::Cast(_, inner)
+                if g.class.erased_casts.contains(&inner.id)
+                    && g.enum_of(e).is_some()
+                    && g.enum_of(inner).is_some() =>
+            {
+                Some(&**inner)
+            }
+            _ => None,
+        };
+        let (a, b) = (uncast(self, l), uncast(self, r));
+        if a.is_none() && b.is_none() || self.facts.identity_checks.contains(&id) {
+            return None;
+        }
+        let (a, b) = (a.unwrap_or(l), b.unwrap_or(r));
+        let (Some(s), Some(t)) = (self.enum_of(a), self.enum_of(b)) else { return None };
+        if self.unequal_bits_tags(s).is_some() && self.unequal_bits_tags(t).is_some() {
+            return None;
+        }
+        let symbol = if op == BinOp::Ne { "!=" } else { "==" };
+        let text = if self.nullable(a) || self.nullable(b) {
+            let (x, y) = (self.enum_option(a), self.enum_option(b));
+            format!("{x}.map(|o| o.0) {symbol} {y}.map(|o| o.0)")
+        } else {
+            let (x, y) = (self.object_ref(a), self.object_ref(b));
+            format!("{} {symbol} {}", bits_of(x), bits_of(y))
+        };
+        Some(Code::new(text, CMP))
     }
 
     /// The text of a non-null object of `e`'s class, reached through `handle`, a `&Rc<..>`: what
@@ -2847,4 +2887,15 @@ fn copied_local(text: &str, local: &str) -> String {
         from = end;
     }
     text.to_string()
+}
+
+/// The bits (`java::Thin`) of the enum value that `reference` borrows, as `object_ref` gives it:
+/// `key.0` for `key` or `&key`, `(&keys[i]).0` otherwise.
+fn bits_of(reference: String) -> String {
+    let name = |s: &str| s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.');
+    match reference.strip_prefix('&') {
+        Some(place) if name(place) => format!("{place}.0"),
+        _ if name(&reference) => format!("{reference}.0"),
+        _ => format!("({reference}).0"),
+    }
 }
