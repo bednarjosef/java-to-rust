@@ -1721,6 +1721,9 @@ impl<'t> Lowering<'t> {
             {
                 return self.objects_call(node, name, args);
             }
+            ("java.util.Objects", name) if self.typed_objects_call_fits(node, name, &args) => {
+                return self.typed_objects_call(node, name, args);
+            }
             ("java.lang.StackWalker", "walk") if !symbol.is_static && args.len() == 1 => {
                 return self.stack_walk(node, receiver, args);
             }

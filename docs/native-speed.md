@@ -369,6 +369,18 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   (`analysis/proven_classes.rs`) calls the dispatcher among the proven classes the same way,
   closed where the points-to facts do not narrow them further or list every class
   (docs/object-model.md, 1.5).
+- **`Objects.equals`, `hashCode` and `hash` in place** (built): with the JDK translated, such a
+  call whose arguments' types name no type variable and no generic class is written where it is
+  (`lower::java_objects`): `a == b || a != null && a.equals(b)`, with each argument read once,
+  `a != null ? a.hashCode() : 0`, and for `hash(a, b, ..)` `31 * h + hash(v)` over the values
+  javac would pack into its array, from 1. The `equals` or `hashCode` is then a call on the
+  argument's own type, which the direct calls above narrow, not the JDK's method on an `Object`,
+  which dispatches over every class of the program and copies its arguments into `Object`s; and
+  `hash` makes no array. A string, a box or a number is compared and hashed by value as before,
+  and an enum constant hashes through `Object.hashCode`, its identity, as Java's does. A literal
+  passed to `equals` but `null` is put in a local first, so that the shortcut `a == b` compares
+  two variables, as in the JDK's `Objects.equals`, and so compares strings and boxes by value
+  (docs/object-model.md, 1.6).
 - **Profiled calls** (built): a call that the points-to facts leave on every class of its type
   can still meet one class almost always at run time, as `list.iterator()` on the Minecraft
   server's lists does, where a JIT's inline cache tests for that class and inlines its method.
