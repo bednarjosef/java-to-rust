@@ -114,9 +114,10 @@ included (docs/collector.md).
   backtracking engine in the runtime (`regex.rs`): literals, escapes, classes, `\R`, groups
   (atomic too), lookahead, back references, alternation, anchors, the word boundaries `\b` and
   `\B` (Java's: an ASCII word character, or a non-spacing mark after a letter or digit), and
-  greedy, lazy and possessive quantifiers. Lookbehind, flags, named groups, `\p{..}` and set
-  intersections are rejected in a constant pattern and throw `UnsupportedOperationException` in
-  a computed one. In a program translated with the JDK's sources, such a constant pattern and
+  greedy, lazy and possessive quantifiers. A quote (`\Q..\E`) is read as Java reads it, in a set
+  too. A malformed pattern throws `PatternSyntaxException` with Java's description and index.
+  Lookbehind, flags, named groups, `\p{..}` and set intersections are rejected in a constant
+  pattern and throw `UnsupportedOperationException` in a computed one. In a program translated with the JDK's sources, such a constant pattern and
   every computed one are the JDK's own `Pattern`'s instead, as Java's `String` calls it
   (`lower/regex.rs`).
 - **`String.format`** is Java's `Formatter` in the US locale for `%b %h %s %c %d %o %x %e %f %g

@@ -1187,6 +1187,72 @@ class UnknownFormatFlagsException extends IllegalFormatException {
     }
 }
 
+// A malformed regular expression. The runtime raises it with the text of `getMessage()`
+// (`java_runtime::regex::syntax_message`), which the constructor with `raised` reads back: the
+// first line is the description, then " near index " and the index when there is one; the rest
+// is the pattern, followed by a line with the caret only when the index is inside the pattern,
+// and so only when the rest is longer than the index.
+class PatternSyntaxException extends IllegalArgumentException {
+    private String desc;
+    private String pattern;
+    private int index;
+
+    public PatternSyntaxException(String desc, String regex, int index) {
+        this.desc = desc;
+        this.pattern = regex;
+        this.index = index;
+    }
+
+    PatternSyntaxException(String message, boolean raised) {
+        int end = message.indexOf('\n');
+        String first = message.substring(0, end);
+        String rest = message.substring(end + 1);
+        int near = first.lastIndexOf(" near index ");
+        int at = -1;
+        if (near >= 0) {
+            at = 0;
+            for (int i = near + 12; i < first.length(); i++) {
+                at = at * 10 + (first.charAt(i) - '0');
+            }
+            first = first.substring(0, near);
+        }
+        if (at >= 0 && rest.length() > at) {
+            rest = rest.substring(0, rest.length() - at - 2);
+        }
+        this.desc = first;
+        this.pattern = rest;
+        this.index = at;
+    }
+
+    public int getIndex() {
+        return index;
+    }
+
+    public String getDescription() {
+        return desc;
+    }
+
+    public String getPattern() {
+        return pattern;
+    }
+
+    public String getMessage() {
+        String text = desc;
+        if (index >= 0) {
+            text = text + " near index " + index;
+        }
+        text = text + "\n" + pattern;
+        if (index >= 0 && pattern != null && index < pattern.length()) {
+            text = text + "\n";
+            for (int i = 0; i < index; i++) {
+                text = text + (pattern.charAt(i) == '\t' ? "\t" : " ");
+            }
+            text = text + "^";
+        }
+        return text;
+    }
+}
+
 // Bad compressed data, which the runtime's decompressor raises (`inflate.rs`).
 class DataFormatException extends Exception {
     public DataFormatException() {
