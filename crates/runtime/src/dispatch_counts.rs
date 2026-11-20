@@ -2,12 +2,13 @@
 //! translation that tests the classes a call mostly sees before it dispatches (docs/native-speed.md,
 //! "Profiled calls"). The translator emits a count before each such call when it is asked to
 //! (`JAVA_TO_RUST_COUNT_DISPATCH=1` while translating); the program then writes, when it exits,
-//! a line per call to the file `JAVA_DISPATCH_COUNTS` names. A translation made without it has
-//! no counts and no cost.
+//! a line per call to the file `JAVA_DISPATCH_COUNTS` names, with each class by its binary name,
+//! which any translation of the program gives it, where its number would only fit a translation
+//! that numbers the classes the same. A translation made without it has no counts and no cost.
 
 use std::io::Write;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// The classes a call kept counts for; any others are counted together.
 const KEPT: usize = 4;
@@ -37,10 +38,15 @@ impl DispatchCount {
 /// The counts that have counted a call, in the order of their first.
 static LISTED: Mutex<Vec<&'static DispatchCount>> = Mutex::new(Vec::new());
 
-/// Counts one call of `count`'s on an object of class number `class` (never 0). Two threads that
-/// count a class for the first time at once may each take a place for it: the file then has the
-/// class twice, which the translator adds up.
-pub fn count_dispatch(count: &'static DispatchCount, class: u16) {
+/// The binary name of each class by its number, from the program (empty where it has none).
+static NAMES: OnceLock<&'static [&'static str]> = OnceLock::new();
+
+/// Counts one call of `count`'s on an object of class number `class` (never 0), whose name
+/// `names` gives (the program's table, the same at every call). Two threads that count a class
+/// for the first time at once may each take a place for it: the file then has the class twice,
+/// which the translator adds up.
+pub fn count_dispatch(count: &'static DispatchCount, class: u16, names: &'static [&'static str]) {
+    NAMES.get_or_init(|| names);
     for (c, n) in count.classes.iter().zip(&count.counts) {
         let held = match c.load(Ordering::Relaxed) {
             0 => c.compare_exchange(0, class, Ordering::Relaxed, Ordering::Relaxed).unwrap_or_else(|now| now),
@@ -71,7 +77,8 @@ fn list(count: &'static DispatchCount) {
 }
 
 /// Writes each call's counts to the file `JAVA_DISPATCH_COUNTS` names, a line per call: its key,
-/// a tab, `class:count` for each class it kept, and `*:count` for the others.
+/// a tab, `class:count` for each class it kept, by its name (by its number where the table names
+/// none), and `*:count` for the others.
 extern "C" fn write_counts() {
     let Some(path) = std::env::var_os("JAVA_DISPATCH_COUNTS") else { return };
     let listed = LISTED.lock().unwrap_or_else(|e| e.into_inner());
@@ -82,7 +89,10 @@ extern "C" fn write_counts() {
         for (c, n) in count.classes.iter().zip(&count.counts) {
             let (c, n) = (c.load(Ordering::Relaxed), n.load(Ordering::Relaxed));
             if c != 0 && n != 0 {
-                text.push_str(&format!("{c}:{n} "));
+                match name_of(c) {
+                    Some(name) => text.push_str(&format!("{name}:{n} ")),
+                    None => text.push_str(&format!("{c}:{n} ")),
+                }
             }
         }
         text.push_str(&format!("*:{}\n", count.others.load(Ordering::Relaxed)));
@@ -92,6 +102,11 @@ extern "C" fn write_counts() {
     }
 }
 
+/// The name of class number `class` in the program's table, if it has one.
+fn name_of(class: u16) -> Option<&'static str> {
+    NAMES.get().and_then(|names| names.get(usize::from(class))).copied().filter(|name| !name.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,8 +114,9 @@ mod tests {
     #[test]
     fn the_first_classes_are_counted_each_and_the_rest_together() {
         static COUNT: DispatchCount = DispatchCount::new("k");
+        static NAMES: [&str; 14] = ["", "", "", "a.B", "", "a.C$D", "", "", "", "", "", "", "", ""];
         for class in [3, 3, 5, 7, 9, 11, 3, 13] {
-            count_dispatch(&COUNT, class);
+            count_dispatch(&COUNT, class, &NAMES);
         }
         let kept: Vec<(u16, u64)> = COUNT
             .classes
@@ -110,5 +126,9 @@ mod tests {
             .collect();
         assert_eq!(kept, [(3, 3), (5, 1), (7, 1), (9, 1)]);
         assert_eq!(COUNT.others.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            (name_of(3), name_of(5), name_of(7), name_of(40)),
+            (Some("a.B"), Some("a.C$D"), None, None)
+        );
     }
 }

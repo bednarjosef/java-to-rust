@@ -70,6 +70,31 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
     numbers
 }
 
+/// The binary name of type `t` of `class`, not an array's, as `Class.getName()` gives it
+/// (`Gen::binary_name`), which names a class in a dispatch profile (`profiled_sets`) too.
+pub(super) fn plain_binary_name(class: &Class, t: usize) -> String {
+    let decl = &class.types[t];
+    if decl.kind == TypeKind::Runtime {
+        return decl.name.clone();
+    }
+    if let Some((binary, _)) = decl.origin.java_names() {
+        return binary.to_string();
+    }
+    if crate::lower::is_standard(&decl.name) {
+        return crate::lower::standard_binary_name(&decl.name);
+    }
+    // The types of `java.lang` that lowering adds are named without their package.
+    if decl.package.is_empty()
+        && matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD)
+    {
+        return format!("java.lang.{}", decl.name);
+    }
+    match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
+        Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
+        _ => decl.name.replace('.', "$"),
+    }
+}
+
 /// The interfaces of the constant descriptions that the runtime's strings and boxes implement,
 /// and the class of `describeConstable`'s result (`constant_desc_arm`).
 const CONSTABLE: &str = "java.lang.constant.Constable";
@@ -139,23 +164,35 @@ const TWO_SHARE: f64 = 0.85;
 /// The classes that each call mostly saw in the counts of a profiled run (`java::count_dispatch`)
 /// in the file `JAVA_TO_RUST_DISPATCH_PROFILE` names, by the call's key (`Gen::profile_key`):
 /// the one class of `ONE_SHARE` of its calls, else the two of `TWO_SHARE`, for calls made at least
-/// `PROFILED_CALLS` times. The counts name classes by their numbers (`class_numbers`, `numbers`),
-/// which a translation of the same program gives them again.
-pub(super) fn profiled_sets(numbers: &[u16]) -> HashMap<String, std::sync::Arc<[usize]>> {
+/// `PROFILED_CALLS` times. The counts name classes by their binary names (`plain_binary_name`),
+/// which any translation of the program gives them, where the translation that counted could name
+/// them (`DISPATCH_CLASS_NAMES`), else by their numbers (`class_numbers`, `numbers`), which only a
+/// translation that numbers the program's classes the same gives them again: a change of the
+/// translator that adds or drops a class moves most numbers.
+pub(super) fn profiled_sets(class: &Class, numbers: &[u16]) -> HashMap<String, std::sync::Arc<[usize]>> {
     let Some(path) = std::env::var_os("JAVA_TO_RUST_DISPATCH_PROFILE") else { return HashMap::new() };
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("the dispatch profile {}: {e}", std::path::Path::new(&path).display()));
     let class_of: HashMap<u16, usize> = numbers.iter().enumerate().map(|(t, &n)| (n, t)).collect();
+    // A name that two types share names neither.
+    let mut named: HashMap<String, Option<usize>> = HashMap::new();
+    for t in (0..class.types.len()).filter(|&t| class.array_of(t).is_none()) {
+        named.entry(plain_binary_name(class, t)).and_modify(|t| *t = None).or_insert(Some(t));
+    }
+    let class_named = |text: &str| match text.parse::<u16>() {
+        Ok(number) => class_of.get(&number).copied(),
+        Err(_) => named.get(text).copied().flatten(),
+    };
     let mut sets = HashMap::new();
     for line in text.lines() {
         let Some((key, counts)) = line.split_once('\t') else { continue };
         let mut by_class: BTreeMap<usize, u64> = BTreeMap::new();
         let mut total = 0;
         for item in counts.split_whitespace() {
-            let Some((class, n)) = item.split_once(':') else { continue };
+            let Some((class, n)) = item.rsplit_once(':') else { continue };
             let n: u64 = n.parse().unwrap_or(0);
             total += n;
-            if let Some(&c) = class.parse().ok().and_then(|number: u16| class_of.get(&number)) {
+            if let Some(c) = class_named(class) {
                 *by_class.entry(c).or_default() += n;
             }
         }
@@ -851,28 +888,9 @@ impl<'a> Gen<'a> {
 
     /// The binary name of type `t`, as the JVM shows it: `shapes.Outer$Inner`.
     pub(super) fn binary_name(&self, t: usize) -> String {
-        let decl = &self.class.types[t];
-        if let Some(array) = self.class.array_of(t) {
-            return self.descriptor(array);
-        }
-        if decl.kind == TypeKind::Runtime {
-            return decl.name.clone();
-        }
-        if let Some((binary, _)) = decl.origin.java_names() {
-            return binary.to_string();
-        }
-        if crate::lower::is_standard(&decl.name) {
-            return crate::lower::standard_binary_name(&decl.name);
-        }
-        // The types of `java.lang` that lowering adds are named without their package.
-        if decl.package.is_empty()
-            && matches!(decl.name.as_str(), OBJECT | COMPARABLE | ENUM | NUMBER | CHAR_SEQUENCE | RECORD)
-        {
-            return format!("java.lang.{}", decl.name);
-        }
-        match decl.name.strip_prefix(&decl.package).and_then(|rest| rest.strip_prefix('.')) {
-            Some(rest) if !decl.package.is_empty() => format!("{}.{}", decl.package, rest.replace('.', "$")),
-            _ => decl.name.replace('.', "$"),
+        match self.class.array_of(t) {
+            Some(array) => self.descriptor(array),
+            None => plain_binary_name(self.class, t),
         }
     }
 
@@ -2038,7 +2056,8 @@ impl<'a> Gen<'a> {
             let call = self.enum_fn_call(t, &name, "j2r_receiver", &args);
             return Code::atom(format!(
                 "{{ let j2r_receiver = {obj}; static COUNT: java::DispatchCount = java::DispatchCount::new({key:?}); \
-                 java::count_dispatch(&COUNT, j2r_receiver.0.tag()); {call} }}"
+                 java::count_dispatch(&COUNT, j2r_receiver.0.tag(), &crate::{}); {call} }}",
+                super::class_values::DISPATCH_NAMES
             ));
         }
         Code::atom(self.enum_fn_call(t, &name, &obj, &args))

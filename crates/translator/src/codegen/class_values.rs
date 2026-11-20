@@ -25,6 +25,11 @@ pub(super) const TYPE_NAMES: &str = "TYPE_NAMES_BY_CLASS_NUMBER";
 /// The static at the crate root that holds each class by its class number (`Gen::classes_table`).
 pub(super) const CLASSES: &str = "CLASSES_BY_CLASS_NUMBER";
 
+/// The static at the crate root of a translation that counts the classes of calls' receivers
+/// (`JAVA_TO_RUST_COUNT_DISPATCH`) that holds each class's binary name by its class number, so
+/// that the counts name classes as any translation of the program does (`Gen::dispatch_names_table`).
+pub(super) const DISPATCH_NAMES: &str = "DISPATCH_CLASS_NAMES";
+
 /// `match obj.view() { arms }` over the variants of an enum of classes, whose arms match the
 /// view's variants (`dispatch::view_pattern`). With no arms, for an interface that no created class
 /// implements, `obj` has no value to match, so it is run and then the code is unreachable.
@@ -846,6 +851,25 @@ impl<'a> Gen<'a> {
         }
         format!(
             "static {TYPE_NAMES}: [&[&str]; {}] = [\n{}];\n",
+            entries.len(),
+            entries.iter().map(|e| format!("    {e},\n")).collect::<String>()
+        )
+    }
+
+    /// The static `DISPATCH_NAMES` at the crate root, in a translation that counts the classes of
+    /// calls' receivers: each class's binary name at its class number (`dispatch::plain_binary_name`),
+    /// empty for an array, which `java::count_dispatch` writes in its counts.
+    pub(super) fn dispatch_names_table(&self) -> String {
+        if std::env::var_os("JAVA_TO_RUST_COUNT_DISPATCH").is_none() {
+            return String::new();
+        }
+        let mut entries = vec!["\"\"".to_string(); self.class.types.len() + 1];
+        for t in (0..self.class.types.len()).filter(|&t| self.class.array_of(t).is_none()) {
+            entries[usize::from(self.class_tag(t))] =
+                rust_string(&super::dispatch::plain_binary_name(self.class, t));
+        }
+        format!(
+            "static {DISPATCH_NAMES}: [&str; {}] = [\n{}];\n",
             entries.len(),
             entries.iter().map(|e| format!("    {e},\n")).collect::<String>()
         )

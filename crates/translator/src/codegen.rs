@@ -402,7 +402,7 @@ thread_local! {
 /// (docs/native-speed.md, "Profiled calls"); empty without a profile.
 pub(crate) fn profiled_sets(class: &Class) -> HashMap<String, std::sync::Arc<[usize]>> {
     match std::env::var_os("JAVA_TO_RUST_DISPATCH_PROFILE") {
-        Some(_) => dispatch::profiled_sets(&dispatch::class_numbers(class)),
+        Some(_) => dispatch::profiled_sets(class, &dispatch::class_numbers(class)),
         None => HashMap::new(),
     }
 }
@@ -588,7 +588,7 @@ impl Setup {
             .collect();
         let fn_name_set = fn_names.iter().cloned().collect();
         let class_tags = dispatch::class_numbers(class);
-        let profiled = dispatch::profiled_sets(&class_tags);
+        let profiled = dispatch::profiled_sets(class, &class_tags);
         let proven_sets = dispatch::proven_sets(class, facts);
         let mut setup = Setup {
             live: phase("codegen: setup: live types", || live_types(class, facts)),

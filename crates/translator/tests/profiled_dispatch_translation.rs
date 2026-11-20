@@ -201,7 +201,11 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
     );
     assert_contains(
         &counted,
-        &["java::count_dispatch(&COUNT, j2r_receiver.0.tag()); MainShape__area(j2r_receiver)"],
+        &[
+            "java::count_dispatch(&COUNT, j2r_receiver.0.tag(), &crate::DISPATCH_CLASS_NAMES); MainShape__area(j2r_receiver)",
+            "static DISPATCH_CLASS_NAMES: [&str; ",
+            "\"Main$Square\",",
+        ],
     );
     // The class number of `Square`, from its arm in the dispatcher.
     let arm = counted.find(" => { let o: &Arc<MainSquare>").expect("an arm for `Square`");
@@ -327,6 +331,13 @@ fn a_call_counts_its_classes_and_then_tests_for_the_one_it_mostly_saw() {
             "MainShape__area_among_",
         ],
     );
+
+    // A profile that names the classes, as the counts of a translation with the names table do,
+    // fits a translation that numbers them differently.
+    let profiled = translate_profiled(SHAPES, "Main.total/1@9:39#area\tMain$Square:1900 Main$Rect:100 *:0\n");
+    let among = profiled.find("fn MainShape__area_among_").expect("a dispatcher among the named class");
+    let end = among + profiled[among..].find("\n}").unwrap();
+    assert_contains(&profiled[among..end], &["let o: &Arc<MainSquare>"]);
 
     // A call that every class runs the same way, a private method of their base class's fields,
     // tests for no class first, where the virtual call beside it does.
