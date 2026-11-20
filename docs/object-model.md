@@ -538,7 +538,11 @@ class with different bits call `eq_by_value`, which tests the class among those 
 (900 on the Minecraft server) and compares them, in a body crate of a split program
 (docs/several-crates.md), where the whole test was too large for the link's inlining. `==` on enum
 values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles
-keep `Arc::ptr_eq` and `java::same`.
+keep `Arc::ptr_eq` and `java::same`. An object of a class that no enum represents against a value
+of an enum (`this == o` in an `equals`) views the value as that class and compares the addresses
+(`Gen::object_value_identity`), as `Object.equals` on such an object does: made a value of the
+enum, the object's handle would be cloned and dropped. A null test that is false of a field read
+through `this` or a variable, none of them null, reads nothing.
 
 A string or a box inside `Object` is a plain value whose identity the translation does not
 keep, so `==` between two `Object`s where both sides may be strings or boxes is

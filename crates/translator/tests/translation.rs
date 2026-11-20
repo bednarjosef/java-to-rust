@@ -784,6 +784,27 @@ fn a_pattern_variable_is_never_null_so_reading_it_needs_no_held_receiver() {
 }
 
 #[test]
+fn an_object_compared_with_an_object_value_is_compared_by_address_without_a_clone() {
+    // `this == o` views `o` as a `P` and compares addresses, instead of making `this` an `Object`
+    // (a clone of its handle); the record's `c == null` of a component that is never null reads
+    // nothing.
+    let rust = translate(
+        "class P { final int x; P(int x) { this.x = x; }
+            public boolean equals(Object o) { if (this == o) return true; return o instanceof P p && p.x == x; }
+            public int hashCode() { return x; } }
+        record R(P p) {}
+        class A { public static void main(String[] a) {
+            P p = new P(1); Object q = new P(1);
+            System.out.println(p.equals(p) + \" \" + p.equals(q) + \" \" + p.equals(null) + \" \" + p.equals(\"x\"));
+            R r = new R(p);
+            System.out.println(r.equals(r) + \" \" + r.equals(new R(new P(1))) + \" \" + r.equals(new R(new P(2))) + \" \" + r.hashCode());
+        } }",
+    );
+    assert_contains(&rust, &["std::ptr::addr_eq("]);
+    assert_lacks(&rust, &["(this.clone())) ==", "; false }"]);
+}
+
+#[test]
 fn to_string_is_a_method_that_printing_and_concatenation_call() {
     let rust = translate(
         "class P { int x; public String toString() { return \"P\" + x; } }
@@ -1098,7 +1119,8 @@ fn enum_identity_is_pointer_equality() {
             "impl PartialEq for Base {",
             "self.0 == other.0",
             "&b == &r",
-            "&b == &Base::Circle(c.clone())",
+            // An object of one class against a value of the enum: viewed as that class, by address.
+            "{ let address = Arc::as_ptr(&c); matches!((&b).view(), BaseView::Circle(ref b) if std::ptr::addr_eq(address, Arc::as_ptr(b))) }",
         ],
     );
 }
@@ -5960,7 +5982,7 @@ fn an_interface_is_an_enum_over_its_implementors() {
             "enum ShapeView<'a> {\n    Circle(Arc<Circle>) = 1,\n    Rect(Arc<RectFields>) = 2,\n    Square(Arc<Square>) = 3,\n    Color(&'a Color) = 6,\n}",
             "        3 => { let o: &Arc<Square> = &unsafe { this.0.to_pointer() }; o.base.area() }\n        6 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
             "Shape::Circle(slot_2.put(Circle__new(1.0))), Shape::Rect(r.clone())",
-            "&s == &Shape::Rect(r.clone())",
+            "{ let address = Arc::as_ptr(&r); matches!((&s).view(), ShapeView::Rect(ref b) if std::ptr::addr_eq(address, Arc::as_ptr(b))) }",
         ],
     );
 }
