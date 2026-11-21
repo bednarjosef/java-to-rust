@@ -170,9 +170,12 @@ fn class_number(bits: u64) -> u16 {
     #[cfg(target_arch = "x86_64")]
     {
         let mut n = bits;
-        // A shift, which reads and writes no memory and leaves the flags.
+        // A shift, which reads and writes no memory. It writes the flags, as every `shr` by a
+        // count that is not 0 does, so it must not promise to leave them (`preserves_flags`):
+        // LLVM may put a shift with that promise between an instruction that sets the flags and
+        // the jump that reads them, and the jump then tests the class number for 0 instead.
         unsafe {
-            std::arch::asm!("shr {n}, 48", n = inout(reg) n, options(pure, nomem, nostack, preserves_flags));
+            std::arch::asm!("shr {n}, 48", n = inout(reg) n, options(pure, nomem, nostack));
         }
         // Facts of the instruction, which the optimizer cannot see: what it leaves is below 2^16,
         // so a compare reads the 32 bits that hold it with no zero-extension first; and it is at
