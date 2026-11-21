@@ -10,7 +10,7 @@
 //! methods, which a census does not catch (`catch_panics`), comes out of the first module in
 //! their order that panicked, with its place in the translator, as it would with one thread.
 //!
-//! The generator writes on four threads, or as many as the machine has if fewer, unless
+//! The generator writes on eight threads, or as many as the machine has if fewer, unless
 //! `JAVA_TO_RUST_GENERATOR_THREADS` says how many (see "Generator threads" in
 //! docs/performance.md).
 
@@ -36,7 +36,7 @@ pub fn on_threads<T>(threads: usize, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// How many threads write modules: `JAVA_TO_RUST_GENERATOR_THREADS`, or four (`DEFAULT_THREADS`),
+/// How many threads write modules: `JAVA_TO_RUST_GENERATOR_THREADS`, or eight (`DEFAULT_THREADS`),
 /// or as many as the machine has if fewer.
 fn threads() -> usize {
     THREADS.get().unwrap_or_else(|| {
@@ -46,9 +46,9 @@ fn threads() -> usize {
     })
 }
 
-/// The threads that write modules by default: past four, the crate root, written by one thread,
-/// is most of a round on the Minecraft server.
-const DEFAULT_THREADS: usize = 4;
+/// The threads that write modules by default: on the Minecraft server's census, eight write its
+/// first round in 6.3 s and four in 8.5 s, at the same peak.
+const DEFAULT_THREADS: usize = 8;
 
 /// A panic while a module was written, with the module's place among those written, where in
 /// the translator it happened, and the method being written then (`WRITING`).

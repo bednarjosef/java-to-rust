@@ -878,8 +878,10 @@ GB). On javac's whole translation, mimalloc takes the generator from 7.0 s to 4.
 and 3.7 s on four, at a peak of 2.19 GB instead of 1.90 GB. On the Minecraft server's census,
 four threads with mimalloc take the generator from 97 s to 42 s (its first round from 34 s to
 8 s) at a census peak of 15.3 GB, and the trial's sources are the same, byte for byte, as one
-thread's. The generator writes on four threads, or on as many as the machine has if fewer, unless
-`JAVA_TO_RUST_GENERATOR_THREADS` says how many. A module of many functions is written in parts
+thread's. The generator writes on eight threads, or on as many as the machine has if fewer, unless
+`JAVA_TO_RUST_GENERATOR_THREADS` says how many: on the Minecraft server's census, from a
+checkpoint, eight threads write it in 17.8 s (the first round 6.3 s, the last 3.8 s) and four in
+20.1 s (8.5 s and 4.0 s), at the same peak. A module of many functions is written in parts
 of 128 functions (`modules::PART_FUNCTIONS`), each a unit of its own for the threads, and joined
 in order (`modules::join_parts`): the crate root of the Minecraft server has 1,384 functions of
 the reflection table, which one thread wrote in 11.6 of the first round's 18.6 s on a loaded
