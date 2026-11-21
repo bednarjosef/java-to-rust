@@ -97,9 +97,9 @@ made on the stack (`java::count_allocation`).
   2.06 G (docs/collector.md, "Allocation"). BinaryTrees keeps a tree of about 32 MB alive while it builds and drops millions of
   short-lived ones; the collector marks that long-lived tree again at each collection. Its
   marking on 16 threads takes several times the program's own processor time between
-  collections, so the collector lets twice as many bytes be taken between them (docs/collector.md,
-  "Collection"): 38 collections instead of 70, 1.06 s instead of 1.18 s, at a peak of 279 MB
-  instead of 217 MB. The rest is the program itself, much of it the first store to each new slot, a cache miss, which not zeroing the slot moves to the
+  collections, so the collector lets more bytes be taken between them, up to 256 MB for a heap
+  this small (docs/collector.md, "Collection"): 25 collections instead of 70, 17.7 G instructions
+  instead of 32.7 G, at a peak of 331 MB instead of 191 MB. The rest is the program itself, much of it the first store to each new slot, a cache miss, which not zeroing the slot moves to the
   constructor's stores without saving time. `SmallObjects` likewise marks a linked list of 2 million
   nodes again at each of its collections, which no helper can share. Of the 60 million nodes its
   last loop makes, the half that each iteration's `Node n` holds are made on the stack, because the
