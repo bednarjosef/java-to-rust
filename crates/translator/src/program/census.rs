@@ -641,6 +641,14 @@ fn analyse(
         &|class| crate::timings::phase("census: string identity", || analysis::string_identity(class)),
         &|class| crate::timings::phase("census: whole objects", || analysis::whole_objects_all(class)),
         &|class| {
+            let made = crate::timings::phase("census: closure factories", || {
+                analysis::inline_closure_factories(class)
+            });
+            // The stubs' expressions take ids after those of the lambdas that replaced calls.
+            if let Some(next) = made {
+                let mut stubs = stubs.borrow_mut();
+                stubs.next_id = stubs.next_id.max(next);
+            }
             unresolved_calls(class)?;
             crate::timings::phase("census: checks of the code", || known_before_analyses(class))
         },

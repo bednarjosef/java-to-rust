@@ -37,6 +37,7 @@ pub fn translate_with_notes(java: &str) -> Result<(String, Vec<ast::Note>), Erro
     let notes = std::mem::take(&mut class.notes);
     analysis::string_identity(&mut class).map_err(|mut errors| errors.remove(0))?;
     analysis::whole_objects(&mut class)?;
+    analysis::inline_closure_factories(&mut class);
     class.thread_statics = analysis::thread_statics(&class);
     let mut facts = analysis::analyze(&class)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.

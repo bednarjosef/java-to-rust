@@ -341,7 +341,7 @@ fn self_type(class: &Class, t: usize) -> Type {
 }
 
 /// The first expression id that no expression of the class has.
-fn next_id(class: &Class) -> ExprId {
+pub(super) fn next_id(class: &Class) -> ExprId {
     let mut max = 0;
     let mut see = |e: &Expr| max = max.max(e.id);
     for m in &class.methods {
