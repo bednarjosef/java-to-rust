@@ -204,6 +204,8 @@ pub struct Session {
     asked: HashSet<String>,
     /// The size of the trees received so far, in bytes of JSON.
     pub received: usize,
+    /// The time taken so far to turn that JSON into values.
+    pub parsing: std::time::Duration,
 }
 
 impl Session {
@@ -247,8 +249,15 @@ impl Session {
             }
             bytes
         });
-        let mut session =
-            Session { child, input, output, errors: Some(errors), asked: HashSet::new(), received: 0 };
+        let mut session = Session {
+            child,
+            input,
+            output,
+            errors: Some(errors),
+            asked: HashSet::new(),
+            received: 0,
+            parsing: std::time::Duration::ZERO,
+        };
         let units = session.read()?;
         Ok((session, units))
     }
@@ -277,7 +286,9 @@ impl Session {
         }
         crate::timings::note_javac();
         self.received += line.len();
+        let start = std::time::Instant::now();
         let mut tree = parse(&line).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
+        self.parsing += start.elapsed();
         Ok(match tree["units"].take() {
             Value::Array(units) => units.into(),
             _ => Vec::new(),
