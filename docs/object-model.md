@@ -742,13 +742,18 @@ to run.
   field initializers in order and the rest of its body; `this` can have left from the first of
   these that uses it as a value (passes, stores or captures it, or calls a method on it), from a
   superclass constructor or initializer that does, and from a `this(..)`. Until then no other
-  thread holds the object. The Minecraft server's `ChunkAccess.sections`, whose class never lets
+  thread holds the object. A class built whole (section 1.4's second constructor form) is built
+  by the methods `construct<Name>` and `initializeFields` made of its constructors and field
+  initializers, which count as its constructors here (`Class::constructs`), and a call of one on
+  `this` lets it leave only where that class or a superclass does: the server's `StateHolder`
+  (a `BlockState`'s `owner`, its block, and its property arrays) is built so, since
+  `BlockStateBase`'s constructor passes `this.asState()` to the block's properties. The Minecraft server's `ChunkAccess.sections`, whose class never lets
   `this` leave, is such a field, and so are the enclosing instance of `ChunkMap.DistanceManager`
   and the maps `ChunkMap`'s field initializers make, which come before its constructor hands
   `this` to the light engine. The runtime's
   `fixed.rs` gives the reasons that the borrow cannot alias a write. A fixed field of a celled
-  object is read where it is too, `(*c.name.fixed())`, outside the constructors and field
-  initializers, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
+  object is read where it is too, `(*c.name.fixed())`, outside the constructors, field
+  initializers and construction methods, which write it (`Gen::fixed_cell`): a `java::SharedField` of a value that is not
   one word (a `Class`, a lambda) is otherwise copied out under a striped spin lock, and a
   lambda's handle counted, at each read. The Minecraft server's reflection table read each
   member's class so. A fixed number, boolean, char or enum of a `java::SharedField` is read

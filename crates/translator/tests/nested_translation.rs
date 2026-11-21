@@ -391,7 +391,8 @@ fn an_anonymous_subclass_takes_its_superclasses_explicit_enclosing_instance() {
 fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_instance_first() {
     // The object exists before the superclass's constructor runs (the second constructor form of
     // `analysis/whole_objects.rs`), and it is built with its enclosing instance, which javac
-    // sets before `super(..)`, so the override reads it set.
+    // sets before `super(..)`, so the override reads it set. Only construction writes it, so
+    // the read borrows it in place.
     let rust = translate(
         "class A {
             int total = 5;
@@ -413,7 +414,7 @@ fn an_inner_superclass_whose_constructor_calls_an_override_gets_its_enclosing_in
         &[
             "fn ABaseFields__new(outer: Arc<A>) -> ABaseFields {",
             "ADerived { base: ABaseFields__new(outer.clone()) }",
-            "java::concat!(format_args!(\"derived {}\", self.base.outer.get().total))",
+            "java::concat!(format_args!(\"derived {}\", (*self.base.outer.fixed()).total))",
         ],
     );
 }

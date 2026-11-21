@@ -536,6 +536,13 @@ pub struct TableData {
 }
 
 impl Class {
+    /// Whether method `m` builds its object: a constructor, or a method that `whole_objects`
+    /// made of a constructor or of field initializers (`construction_methods`), which runs on the
+    /// object as the constructor would.
+    pub fn constructs(&self, m: usize) -> bool {
+        self.methods[m].is_ctor || self.construction_methods.contains_key(&m)
+    }
+
     /// The class and the constructor, or the factory that stands for it, of an object of
     /// `raised`.
     pub fn raised_object<'e>(&self, e: &'e Expr) -> Option<(usize, usize, &'e [Expr])> {

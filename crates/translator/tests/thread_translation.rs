@@ -839,6 +839,42 @@ fn a_fixed_number_boolean_or_enum_field_of_a_shared_object_is_read_with_a_plain_
 }
 
 #[test]
+fn a_class_built_whole_keeps_the_fields_written_before_this_leaves_fixed() {
+    // `Base`'s constructor hands `this` to a lambda that starts a thread, so the classes are
+    // built whole and `Holder`'s `keys`, written by `construct_holder` before `this` leaves, stays
+    // fixed; `emission`, written in the statement that lets it leave, is read with `get`.
+    let rust = translate(
+        "import java.util.function.ToIntFunction;
+class A {
+    static int aside(Runnable r) {
+        Thread t = new Thread(r);
+        t.start();
+        try { t.join(); } catch (InterruptedException e) { }
+        return 1;
+    }
+    static abstract class Holder {
+        final String[] keys;
+        Holder(String[] keys) { this.keys = keys; }
+        int count() { return keys.length; }
+    }
+    static class Base extends Holder {
+        final int emission;
+        Base(ToIntFunction<Base> light, String[] keys) { super(keys); this.emission = light.applyAsInt(this); }
+    }
+    static final class State extends Base {
+        State(ToIntFunction<Base> light) { super(light, new String[] { \"a\" }); }
+    }
+    public static void main(String[] args) {
+        State s = new State(b -> aside(() -> System.out.println(b.count())) + b.count());
+        System.out.println(s.emission + \" \" + s.count());
+    }
+}",
+    );
+    assert_contains(&rust, &["fn construct_holder(", ".keys.fixed()", ".emission.get()"]);
+    assert_lacks(&rust, &[".keys.get()", ".emission.fixed()"]);
+}
+
+#[test]
 fn fields_written_before_this_leaves_the_constructor_stay_fixed() {
     let rust = translate(
         "class A {

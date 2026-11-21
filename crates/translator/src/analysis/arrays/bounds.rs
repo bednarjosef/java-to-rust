@@ -109,12 +109,13 @@ pub(super) fn field_lengths(class: &Class) -> FastMap<(usize, String), i64> {
 /// length (`field_lengths`).
 pub(super) fn in_bounds(
     class: &Class,
-    method: &Method,
+    m: usize,
     plain: &FastSet<String>,
     reshaped: &FastSet<String>,
     facts: &Facts,
     lengths: &FastMap<(usize, String), i64>,
 ) -> Vec<ExprId> {
+    let method = &class.methods[m];
     let mut declared: FastMap<&str, usize> = FastMap::default();
     let mut inits: FastMap<&str, &Expr> = FastMap::default();
     // Variables declared by for-each loops only: each lives in its own loop and is not assigned
@@ -173,7 +174,7 @@ pub(super) fn in_bounds(
         .collect();
     let mut walk = Walk {
         class,
-        ctor: method.is_ctor,
+        ctor: class.constructs(m),
         facts,
         field_lengths: lengths,
         plain,
@@ -249,7 +250,8 @@ struct Guard {
 
 struct Walk<'a> {
     class: &'a Class,
-    /// Whether the method is a constructor, which may assign its fixed fields.
+    /// Whether the method is a constructor or a method that builds the object as one does
+    /// (`Class::constructs`), which may assign its fixed fields.
     ctor: bool,
     facts: &'a Facts,
     /// The fields whose every array has one length (`field_lengths`).

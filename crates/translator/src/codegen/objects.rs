@@ -877,8 +877,9 @@ impl<'a> Gen<'a> {
 
     /// Whether the field `name` of `object`, of type `ty`, is the cell of a fixed field (`fixed`)
     /// that is read where it is, without copying its value out through the cell's `get`: the
-    /// object is celled, the field is not `volatile`, and the code is not a constructor's or a
-    /// field initializer's, which write the fixed fields. Once its object is built nothing writes
+    /// object is celled, the field is not `volatile`, and the code is not a constructor's, a field
+    /// initializer's or a method's that builds the object as they do (`Class::constructs`), which
+    /// write the fixed fields. Once its object is built nothing writes
     /// the field, so a reference into the cell aliases no write (the runtime's `Field::fixed`).
     /// A primitive or a Java enum's value is read so only from a `java::SharedField`, whose `get`
     /// is an atomic load that the optimizer neither merges with another read of the field nor
@@ -892,7 +893,7 @@ impl<'a> Gen<'a> {
             && self.fixed(object, name)
             && !self.volatile_cell(object, name)
             && !self.in_field_inits
-            && !self.class.methods[self.method].is_ctor
+            && !self.class.constructs(self.method)
     }
 
     /// The method that a call of `resolved` on `receiver` runs: the one it names for `super.m()`,
