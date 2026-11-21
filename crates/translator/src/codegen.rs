@@ -747,6 +747,9 @@ impl<'a> Gen<'a> {
             variant_lists: Default::default(),
             enum_variant_lists: Default::default(),
             passing_lists: Default::default(),
+            tested_lists: Default::default(),
+            runtime_variant_lists: Default::default(),
+            own_test_runs: Default::default(),
             cast_classes: Default::default(),
             enum_variant_sets: Default::default(),
             receivers_listed: Default::default(),
@@ -980,6 +983,16 @@ struct Gen<'a> {
     /// The variants of the enum of each type whose objects are of another type
     /// (`dispatch::passing`), by the two, once found.
     passing_lists: std::cell::RefCell<HashMap<(usize, usize), Classes>>,
+    /// What the points-to facts tell of a test of the values of the enum of a type against
+    /// another (`dispatch::tested_classes`), by the two and the address of the list of classes
+    /// of `Class::tested`, once found.
+    tested_lists: std::cell::RefCell<HashMap<(usize, usize, usize), Option<dispatch::Tested>>>,
+    /// The variants of the enum of each type that the runtime makes (`dispatch::runtime_variants`),
+    /// once found.
+    runtime_variant_lists: std::cell::RefCell<HashMap<usize, Classes>>,
+    /// The number of ranges of class numbers of the test of the values of the enum of a type
+    /// against another (`dispatch::own_runs`), by the two, once found.
+    own_test_runs: std::cell::RefCell<HashMap<(usize, usize), usize>>,
     /// The text of each class as a `ClassCastException` names it (`dispatch::cast_class`), once
     /// made.
     cast_classes: HashMap<usize, String>,

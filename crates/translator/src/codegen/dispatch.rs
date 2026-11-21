@@ -142,6 +142,18 @@ const LAST_ARM_RUNS: usize = 4;
 /// `match` of; one of more runs is a `java::ClassSet`, a bit per number, one load and a shift.
 const SET_RUNS: usize = 4;
 
+/// What a whole program's facts tell of a cast or an `instanceof` test (`Gen::tested_classes`).
+#[derive(Clone)]
+pub(super) enum Tested {
+    /// Every value it may be passes.
+    All,
+    /// No value it may be passes: only null does.
+    Fails,
+    /// The class numbers of those that may come and pass, written for a `matches!` among those
+    /// that may come, in fewer ranges than the type's own test.
+    Tags(std::rc::Rc<str>),
+}
+
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
 const PART_CLASSES: usize = 256;
@@ -1036,6 +1048,90 @@ impl<'a> Gen<'a> {
         found
     }
 
+    /// What a whole program's facts (`Class::tested`) tell of the test of `value`, a value of the
+    /// enum of `s`, against type `t`, or `None` where they tell nothing or leave a test no
+    /// smaller than the type's own. The classes the value may be are those of the program's
+    /// classes whose objects the facts say it may be, and every variant of the runtime's (a
+    /// string, a box, a `Class`, an array), which the facts do not all follow. A test of the
+    /// numbers of those that pass, among those, passes the same values as a test of every class
+    /// of the type (a table, or many ranges for an interface), as the value is of none of the
+    /// others. It is used where it is at most a few ranges, a compare or two each, and fewer than
+    /// the type's own. Found once for each list of classes, which the tests of values that the
+    /// facts give the same classes share.
+    fn tested_classes(&self, s: usize, t: usize, value: &Expr) -> Option<Tested> {
+        let classes = self.class.tested.get(&value.id)?;
+        let key = (s, t, classes.as_ptr() as usize);
+        if let Some(found) = self.tested_lists.borrow().get(&key) {
+            self.variant_types.borrow_mut().insert(s);
+            return found.clone();
+        }
+        let mut among: Vec<usize> = classes.iter().copied().filter(|&c| self.is_enum_variant(s, c)).collect();
+        among.extend(self.runtime_variants(s).iter().copied());
+        among.sort_unstable();
+        among.dedup();
+        let passing = self.passing(s, t);
+        let pass: Vec<usize> = among.iter().copied().filter(|c| passing.binary_search(c).is_ok()).collect();
+        let found = if pass.len() == among.len() {
+            Some(Tested::All)
+        } else if pass.is_empty() {
+            Some(Tested::Fails)
+        } else {
+            let runs = self.tag_runs(&[&pass], &among).pop().unwrap_or_default().len();
+            (runs <= SET_RUNS && runs < self.own_runs(s, t))
+                .then(|| Tested::Tags(self.tags(&pass, &among).into()))
+        };
+        self.tested_lists.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    /// The variants of the enum of `s` that the runtime makes (`runtime_of`), once found.
+    fn runtime_variants(&self, s: usize) -> Classes {
+        if let Some(found) = self.runtime_variant_lists.borrow().get(&s) {
+            return found.clone();
+        }
+        let found: Classes =
+            self.shared_enum_variants(s).iter().copied().filter(|&c| self.runtime_of(c).is_some()).collect();
+        self.runtime_variant_lists.borrow_mut().insert(s, found.clone());
+        found
+    }
+
+    /// The number of ranges of class numbers that the type's own test of the values of the enum
+    /// of `s` against `t` compares, once found.
+    fn own_runs(&self, s: usize, t: usize) -> usize {
+        if let Some(&found) = self.own_test_runs.borrow().get(&(s, t)) {
+            return found;
+        }
+        let passing = self.passing(s, t);
+        let found = self.tag_runs(&[&passing], &self.shared_enum_variants(s)).pop().unwrap_or_default().len();
+        self.own_test_runs.borrow_mut().insert((s, t), found);
+        found
+    }
+
+    /// The test that `tested_classes` found, as the function that `java::cast` takes: the value
+    /// (`o`, a value of the source enum behind as many references as the cast's value has, so the
+    /// closure names no type) as a value of `t`'s enum where its class is one of those that pass,
+    /// else `None`; with no test where every class it may be passes. `None` where `t` has no enum
+    /// of its own to view the value as. The facts are those that close a call's dispatch to the
+    /// classes its receiver may be (`among`), and as there a debug build checks them against the
+    /// type's own test.
+    fn tested_cast(&mut self, t: usize, tested: &Tested) -> Option<String> {
+        let rep = (self.class.types[t].kind != TypeKind::Enum).then(|| self.enum_for(t)).flatten()?;
+        let target = struct_name(&self.class.types[rep].name);
+        let name = self.as_name(t);
+        Some(match tested {
+            Tested::All => {
+                format!("|o| {{ debug_assert!(o.{name}().is_some()); Some({target}(o.0)) }}")
+            }
+            Tested::Fails => {
+                format!("|o| {{ debug_assert!(o.{name}().is_none()); None::<{target}> }}")
+            }
+            Tested::Tags(tags) => format!(
+                "|o| {{ let passes = matches!(o.0.tag(), {tags}); \
+                 debug_assert_eq!(passes, o.{name}().is_some()); passes.then(|| {target}(o.0)) }}"
+            ),
+        })
+    }
+
     /// The text of the value of `value` for a method to be called on it in a condition: a local
     /// or `this` as it is, anything else in a block of its own, so that no borrow it makes
     /// outlives the test (a let chain keeps its temporaries alive through the guarded block).
@@ -1128,6 +1224,11 @@ impl<'a> Gen<'a> {
             return Some(format!(
                 "|o| if matches!(o.0.tag(), {tags}) {{ Some({proven}(o.{name}())) }} else {{ None }}"
             ));
+        }
+        if let Some(tested) = self.tested_classes(s, t, value)
+            && let Some(test) = self.tested_cast(t, &tested)
+        {
+            return Some(test);
         }
         let key = self.cast_first.filter(|&(id, _)| Some(id) == at)?.1;
         let first: Vec<usize> =
@@ -1245,12 +1346,36 @@ impl<'a> Gen<'a> {
                     });
                 }
                 let tags = self.tags(&passing, &self.enum_variants(s));
-                let text = if nullable {
-                    // Null has class number 0, which no class has: one test.
-                    let tag = self.runtime("Thin::tag_or_null");
-                    format!("matches!({tag}({}.as_ref().map(|o| o.0)), {tags})", self.object_place(value))
+                // A whole program's facts may tell the result, or leave fewer classes to test
+                // (`tested_classes`); a debug build checks them against the type's own test, as
+                // where they close a call's dispatch.
+                let tested = self.tested_classes(s, t, value);
+                if let Some(Tested::All | Tested::Fails) = tested {
+                    let all = matches!(tested, Some(Tested::All));
+                    let not = if all { "" } else { "!" };
+                    let test = format!("{{ debug_assert!({not}matches!(o.0.tag(), {tags})); {all} }}");
+                    return Code::atom(if nullable {
+                        format!("{}.as_ref().is_some_and(|o| {test})", self.object_place(value))
+                    } else {
+                        format!("{{ let o = &{}; {test} }}", operand(&self.object(value)))
+                    });
+                }
+                // The class number of the value; null has 0, which no class has: one test.
+                let tag = if nullable {
+                    format!(
+                        "{}({}.as_ref().map(|o| o.0))",
+                        self.runtime("Thin::tag_or_null"),
+                        self.object_place(value)
+                    )
                 } else {
-                    format!("matches!({}.0.tag(), {tags})", operand(&self.object(value)))
+                    format!("{}.0.tag()", operand(&self.object(value)))
+                };
+                let text = match tested {
+                    Some(Tested::Tags(narrowed)) => format!(
+                        "{{ let tag = {tag}; let passes = matches!(tag, {narrowed}); \
+                         debug_assert_eq!(passes, matches!(tag, {tags})); passes }}"
+                    ),
+                    _ => format!("matches!({tag}, {tags})"),
                 };
                 Code::atom(text)
             }

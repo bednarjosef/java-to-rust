@@ -381,6 +381,20 @@ Each transformation is separate, with its own corpus programs. Each uses a fact 
   passed to `equals` but `null` is put in a local first, so that the shortcut `a == b` compares
   two variables, as in the JDK's `Objects.equals`, and so compares strings and boxes by value
   (docs/object-model.md, 1.6).
+- **Casts and tests from the points-to facts** (built): the same facts give each cast to a class
+  and each `instanceof` of a class the classes of the program whose objects its value may be
+  (`Class::tested`, recorded by the live walk). Where every value it may be passes, a cast is the
+  value viewed as the target's enum, with no test, and an `instanceof` is a null test; where none
+  passes, the cast fails and the test is false. Elsewhere the test compares the class number with
+  those of the classes that may come and pass, against those that may come, when that is at most
+  four ranges and fewer than the type's own test: the cast of an erased type variable's value to
+  an interface, as `(List) map.get(k)`, is otherwise a table of every class of the interface, and
+  the classes that reach it are often a few. The facts pool the elements of arrays by element
+  type, so a value read from an `Object[]` (an `EnumMap`'s or an `ArrayList`'s) may be any object
+  that the program stores in an `Object[]`. The facts do not follow every string, box, `Class` or
+  array, which the runtime makes, so a test counts each class of those that the value's type
+  allows as one it may be. As where the facts close a call's dispatch, a debug build checks each
+  such test against the type's own (`debug_assert!`).
 - **Profiled calls** (built): a call that the points-to facts leave on every class of its type
   can still meet one class almost always at run time, as `list.iterator()` on the Minecraft
   server's lists does, where a JIT's inline cache tests for that class and inlines its method.

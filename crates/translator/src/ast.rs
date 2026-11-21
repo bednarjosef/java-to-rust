@@ -475,6 +475,13 @@ pub struct Class {
     /// allows. Calls with the same classes share one list: on the Minecraft server thousands of
     /// calls may be on any of tens of thousands of classes.
     pub receivers: HashMap<ExprId, std::sync::Arc<[usize]>>,
+    /// The classes of the program whose objects the value of each cast to a class and each
+    /// `instanceof` test of a class in code that can run may be, by the value's id, from the facts
+    /// that give `receivers`; sorted, lists shared as there. Besides those, the value may be any
+    /// value the runtime makes (a string, a box, a `Class`, an array), which the facts do not all
+    /// follow. A test that is not here may be of any object its type allows.
+    #[serde(default)]
+    pub tested: HashMap<ExprId, std::sync::Arc<[usize]>>,
     /// Where the reflection table's members are in the code that lowering wrote for it
     /// (`lower::reflection`), so that a whole program can leave out the members of the classes
     /// whose `Class` values no lookup gets (`analysis::reflection_table`).

@@ -86,7 +86,7 @@ const ARRAY_SUPERTYPES: [&str; 4] =
 
 /// What a place or an expression may hold.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
-pub(super) struct Flow {
+pub struct Flow {
     /// A string, a box or a primitive held as an object.
     value: bool,
     /// Objects of any class its type allows; `classes` lists them otherwise.
@@ -151,7 +151,7 @@ impl Flow {
     }
 
     /// Adds what `other` may hold; whether that changed anything.
-    fn join(&mut self, other: &Flow) -> bool {
+    pub(super) fn join(&mut self, other: &Flow) -> bool {
         let before = (self.value, self.any, self.any_class, self.any_array);
         self.value |= other.value;
         self.any |= other.any;

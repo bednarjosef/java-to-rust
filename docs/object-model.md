@@ -557,6 +557,15 @@ its call sites, so calling it does not initialize that class.
   both end up in one function. A call on the read dispatches among the proven classes alone (`_only_`, see docs/native-speed.md, "Direct calls"), which
   for one class is a direct call of its method. The body of a lambda is a method of its own and
   starts with nothing proven.
+- In a whole program, the points-to facts that give each call the classes of its receiver
+  give each cast and `instanceof` of a class the classes of the program whose objects its value
+  may be (`Class::tested`). A cast that every one of them passes, and every string, box, `Class`
+  or array the value's type allows (the facts do not follow all of those), is the value viewed
+  as the target's enum, `java::cast(&x, |o| { .. Some(Shape(o.0)) }, ..)`, with no test,
+  and a test of it is a null test; one that none of them passes fails for every object. Between
+  the two, the test compares the class number with those of the classes that may come and pass,
+  where that is a few ranges and fewer than the type's own test (docs/native-speed.md, "Casts and
+  tests from the points-to facts"). A debug build checks each against the type's own test.
 - A cast that is the receiver of a call that tests first for a few classes (the points-to
   facts' or a profile's, `_among_` and `_only_`) tests for those first too, `java::cast(o, |o|
   if matches!(o.0.tag(), 12) { Some(java::proven(o.as_list())) } else { o.as_list() }, ..)`:
