@@ -18,8 +18,10 @@
 //! **Allocation** takes a slot of its size from the calling thread's own free slots, a few
 //! instructions: from the list of slots it freed, or from its span, a run of neighbouring untaken
 //! slots of a block that it took under the heap's lock (no more than fit in `SPAN_BYTES`, one at
-//! least), handed out in order by moving a pointer. A slot that may hold pointers is zeroed as it is handed out, so
-//! that no old word in it keeps an object alive; a pointer-free one only for `alloc_zeroed`.
+//! least), handed out in order by moving a pointer. A slot that may hold pointers is zeroed before
+//! it is handed out (a span's all at once as the thread takes it, one of the free list as it is
+//! taken), so that no old word in it keeps an object alive; a pointer-free one only for
+//! `alloc_zeroed`.
 //!
 //! **Collection** runs when the program has taken as many bytes as were alive after the last one
 //! (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share), times a scale that grows, up to
@@ -1123,6 +1125,11 @@ struct Lists {
     /// lock (`span_from_rest`), which matters where the heap's holes are a few slots long.
     span_rest: [Cell<u64>; CLASSES],
     span_rest_at: [Cell<usize>; CLASSES],
+    /// The spans the thread took since the last collection, those of them under the heap's lock,
+    /// and their slots, for `JAVA_GC_LOG` (`span_counts`).
+    spans: Cell<u64>,
+    spans_locked: Cell<u64>,
+    span_slots: Cell<u64>,
     /// This thread's entry in `THREADS`, once registered.
     entry: Cell<usize>,
     /// Set when the thread has unregistered at its end: it allocates without lists from then on.
@@ -1143,6 +1150,9 @@ thread_local! {
             span_from: [const { Cell::new(0) }; CLASSES],
             span_rest: [const { Cell::new(0) }; CLASSES],
             span_rest_at: [const { Cell::new(0) }; CLASSES],
+            spans: Cell::new(0),
+            spans_locked: Cell::new(0),
+            span_slots: Cell::new(0),
             entry: Cell::new(NO_ENTRY),
             ended: Cell::new(false),
         }
@@ -1356,7 +1366,8 @@ extern "C" fn begin(start: *mut u8) -> *mut u8 {
 }
 
 /// A slot (or a large allocation) for `layout`, of the kind of scanning `scan`, zeroed if it is
-/// scanned whole; for Rust code (`RUST`, the global allocator), or for an object or array.
+/// scanned whole; for Rust code (`RUST`, the global allocator), or for an object or array. A slot
+/// of a span is zeroed already (`fill_span`); one of the free list is zeroed here.
 #[inline(always)]
 fn allocate<const RUST: bool>(layout: Layout, scan: Scan) -> *mut u8 {
     let Some(index) = size_index(layout.size(), layout.align()) else {
@@ -1367,52 +1378,38 @@ fn allocate<const RUST: bool>(layout: Layout, scan: Scan) -> *mut u8 {
         return p;
     };
     let class = index * SCANS + scan as usize;
-    let p = LISTS
+    let size = SIZES[index] as usize;
+    // The slot, and whether it is one of the free list's, which is zeroed after the closure: with
+    // the zeroing in it, the closure grows past what is inlined, and every allocation calls it.
+    let (p, freed) = LISTS
         .try_with(|lists| {
             let head = lists.heads[class].get();
             if !head.is_null() {
                 let next = unsafe { (head as *mut *mut u8).read() };
                 lists.heads[class].set(next);
-                lists.bytes[class].set(lists.bytes[class].get() - SIZES[index] as usize);
-                return head;
+                lists.bytes[class].set(lists.bytes[class].get() - size);
+                return (head, true);
             }
             let next = lists.span_next[class].get();
             if next != lists.span_end[class].get() {
-                lists.span_next[class].set(next + SIZES[index] as usize);
+                lists.span_next[class].set(next + size);
                 if RUST {
                     lists.span_rust[class].set(true);
                 }
-                return next as *mut u8;
+                return (next as *mut u8, false);
             }
             if lists.ended.get() {
-                return allocate_without_lists(class);
+                return (allocate_without_lists(class), false);
             }
             let p = refill(lists, class);
             if RUST {
                 lists.span_rust[class].set(true);
             }
-            p
+            (p, false)
         })
-        .unwrap_or_else(|_| allocate_without_lists(class));
-    // A slot that may hold pointers is zeroed whole as it is handed out, so that no old word
-    // in a part the program does not write keeps an object alive.
-    if scan == SCAN_ALL {
-        let size = SIZES[index] as usize;
-        if size <= 128 {
-            // Word by word, rather than with a call of `memset`: a slot of these sizes is a
-            // whole number of words. The stores are volatile, so that the loop does not
-            // become that call again.
-            let mut q = p as *mut u64;
-            let end = unsafe { p.add(size) } as *mut u64;
-            while q < end {
-                unsafe {
-                    q.write_volatile(0);
-                    q = q.add(1);
-                }
-            }
-        } else {
-            unsafe { zero_slot(p, size) };
-        }
+        .unwrap_or_else(|_| (allocate_without_lists(class), false));
+    if freed && scan == SCAN_ALL {
+        unsafe { zero_freed(p, size) };
     }
     if census::TYPES.load(Ordering::Relaxed) {
         census::note_untyped(p as usize);
@@ -1428,17 +1425,6 @@ fn allocate<const RUST: bool>(layout: Layout, scan: Scan) -> *mut u8 {
 pub(crate) fn alloc_array(size: usize, align: usize, references: bool) -> *mut u8 {
     let layout = Layout::from_size_align(size, align).expect("an array's layout");
     let p = allocate::<false>(layout, if references { SCAN_ALL } else { SCAN_HEAD });
-    if p.is_null() {
-        std::alloc::handle_alloc_error(layout);
-    }
-    p
-}
-
-/// Memory for an object of `layout` that the calling thread's free list and span could not give
-/// (`Arc::new`, `take_slot`): as the global allocator's `alloc`, but not counted as Rust code's
-/// (see `Lists::span_rust`).
-pub(crate) fn alloc_object(layout: Layout) -> *mut u8 {
-    let p = allocate::<false>(layout, scan_of(layout.align()));
     if p.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
@@ -1586,11 +1572,23 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
     if rest != 0 {
         return span_from_rest(lists, class, size, rest);
     }
-    let g = prepare();
-    let h = heap(&g);
+    let (start, end) = {
+        let g = prepare();
+        take_span(heap(&g), lists, class, size)
+    };
+    fill_span(class, start, end);
+    start as *mut u8
+}
+
+/// Takes a new span of `class` for the thread whose lists are `lists`, from the block its last
+/// span was in or another, and makes it the thread's span with its first slot handed out: its
+/// start and end. While the census of types runs, a span is one slot, so that every allocation
+/// reaches `take_slot_cold`, which records its type.
+fn take_span(h: &mut Heap, lists: &Lists, class: usize, size: usize) -> (usize, usize) {
+    let types = census::TYPES.load(Ordering::Relaxed);
     loop {
         let b = lists.span_block[class].get();
-        let most = (SPAN_BYTES / size).max(1);
+        let most = if types { 1 } else { (SPAN_BYTES / size).max(1) };
         // The span's block may have been freed, and taken for another class, since: when every
         // slot the span handed out was freed.
         if b != NONE
@@ -1603,7 +1601,7 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
             let start = slot0 + first * size;
             let end = start + n * size;
             let mut from = first + n;
-            if !from.is_multiple_of(64) {
+            if !from.is_multiple_of(64) && !types {
                 // The span and the rest together hold no more than a span may.
                 let upto = (first + most).min(from / 64 * 64 + 64);
                 let rest = h.take_rest(b, from, upto);
@@ -1618,11 +1616,27 @@ fn refill(lists: &Lists, class: usize) -> *mut u8 {
             lists.span_rust[class].set(false);
             lists.span_next[class].set(start + size);
             lists.span_end[class].set(end);
-            prefetch_span(start, end);
-            return start as *mut u8;
+            lists.spans.set(lists.spans.get() + 1);
+            lists.spans_locked.set(lists.spans_locked.get() + 1);
+            lists.span_slots.set(lists.span_slots.get() + n as u64);
+            return (start, end);
         }
         lists.span_block[class].set(h.next_block(class) as u32);
         lists.span_from[class].set(0);
+    }
+}
+
+/// Readies the slots of a new span of `class`, `[start, end)`: zeroes them if they may hold
+/// pointers, so that no old word in a part the program does not write keeps an object alive and
+/// a slot handed out from the span needs no stores of its own (`take_slot`); else fetches them
+/// into the cache before the program writes them. Run without the heap's lock: a collection
+/// meanwhile keeps the span's slots, as at any time (`keep_spans`), and scans none of them.
+#[inline(always)]
+fn fill_span(class: usize, start: usize, end: usize) {
+    if class % SCANS == SCAN_ALL as usize {
+        unsafe { ptr::write_bytes(start as *mut u8, 0, end - start) };
+    } else {
+        prefetch_span(start, end);
     }
 }
 
@@ -1637,6 +1651,10 @@ fn span_from_rest(lists: &Lists, class: usize, size: usize, rest: u64) -> *mut u
     let n = (rest >> first).trailing_ones() as usize;
     let start = lists.span_rest_at[class].get() + first * size;
     let end = start + n * size;
+    // Zeroed while the slots are still the rest, which a collection keeps.
+    if class % SCANS == SCAN_ALL as usize {
+        unsafe { ptr::write_bytes(start as *mut u8, 0, end - start) };
+    }
     let order = || std::sync::atomic::compiler_fence(Ordering::SeqCst);
     lists.span_start[class].set(0);
     lists.span_rust[class].set(false);
@@ -1646,11 +1664,15 @@ fn span_from_rest(lists: &Lists, class: usize, size: usize, rest: u64) -> *mut u
     order();
     lists.span_start[class].set(start);
     order();
+    lists.spans.set(lists.spans.get() + 1);
+    lists.span_slots.set(lists.span_slots.get() + n as u64);
     let run = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << first };
     lists.span_rest[class].set(rest & !run);
     order();
     lists.span_next[class].set(start + size);
-    prefetch_span(start, end);
+    if class % SCANS != SCAN_ALL as usize {
+        prefetch_span(start, end);
+    }
     start as *mut u8
 }
 
@@ -1662,40 +1684,81 @@ fn prefetch_span(start: usize, end: usize) {
     }
 }
 
-/// A slot for a new value of type `T`, zeroed, from the calling thread's free list or span, or
-/// null when both are empty or `T` takes a large allocation: then `Arc::new` takes the global
-/// allocator's path, which refills them. Inlined into each `Arc::new`, where the slot's class and
-/// size are constants, unlike a call of the global allocator, which finds them from the layout
-/// it is given at run time: BinaryTrees spent about 40% of its main thread in that call.
+/// A slot for a new value of type `T`, zeroed, from the calling thread's span. Inlined into each
+/// `Arc::new`, where the slot's class and size are constants, unlike a call of the global
+/// allocator, which finds them from the layout it is given at run time: BinaryTrees spent about
+/// 40% of its main thread in that call. The span's slots are zeroed already (`fill_span`), so
+/// taking one is a load, a compare and a store; everything else is `take_slot_cold`, one function
+/// given the class, which never returns null.
 #[inline(always)]
 pub(crate) fn take_slot<T>() -> *mut u8 {
     let Some(index) = (const { size_index_of(size_of::<T>(), align_of::<T>()) }) else {
-        return ptr::null_mut();
+        return take_large(Layout::new::<T>(), std::any::type_name::<T>());
     };
-    let scanned = const { align_of::<T>() >= 8 };
     let class = index * SCANS + scan_of(align_of::<T>()) as usize;
     let size = SIZES[index] as usize;
-    let p = LISTS
+    LISTS
         .try_with(|lists| {
-            let head = lists.heads[class].get();
-            if !head.is_null() {
-                let next = unsafe { (head as *mut *mut u8).read() };
-                lists.heads[class].set(next);
-                lists.bytes[class].set(lists.bytes[class].get() - size);
-                return head;
-            }
             let next = lists.span_next[class].get();
             if next != lists.span_end[class].get() {
                 lists.span_next[class].set(next + size);
                 return next as *mut u8;
             }
-            ptr::null_mut()
+            take_slot_cold(lists, class, std::any::type_name::<T>())
         })
-        .unwrap_or(ptr::null_mut());
-    // Zeroed as `alloc` zeroes a slot that may hold pointers; the size is a constant here, so
-    // this is a few stores.
-    if scanned && !p.is_null() {
-        unsafe { zero_slot(p, size) };
+        .unwrap_or_else(|_| take_slot_without_lists(class, std::any::type_name::<T>()))
+}
+
+/// A slot of `class` for a new object of the type named `name` when the calling thread's span is
+/// empty: from the thread's free list (the slots Rust code freed), or a new span (`refill`),
+/// zeroed. Here, not inline, the census of types records the object's type: while it runs, each
+/// span is one slot (`take_span`), so every object comes here.
+#[cold]
+#[inline(never)]
+fn take_slot_cold(lists: &Lists, class: usize, name: &'static str) -> *mut u8 {
+    let size = SIZES[class / SCANS] as usize;
+    let head = lists.heads[class].get();
+    let p = if !head.is_null() {
+        let next = unsafe { (head as *mut *mut u8).read() };
+        lists.heads[class].set(next);
+        lists.bytes[class].set(lists.bytes[class].get() - size);
+        if class % SCANS == SCAN_ALL as usize {
+            unsafe { ptr::write_bytes(head, 0, size) };
+        }
+        head
+    } else if lists.ended.get() {
+        allocate_without_lists(class)
+    } else {
+        refill(lists, class)
+    };
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, name);
+    }
+    p
+}
+
+/// `take_slot_cold` on a thread whose thread-local storage is gone.
+#[cold]
+#[inline(never)]
+fn take_slot_without_lists(class: usize, name: &'static str) -> *mut u8 {
+    let p = allocate_without_lists(class);
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, name);
+    }
+    p
+}
+
+/// Memory for an object of `layout` too large for a slot, of the type named `name`: as the global
+/// allocator's `alloc`, but not counted as Rust code's (see `Lists::span_rust`).
+#[cold]
+#[inline(never)]
+fn take_large(layout: Layout, name: &'static str) -> *mut u8 {
+    let p = allocate::<false>(layout, scan_of(layout.align()));
+    if p.is_null() {
+        std::alloc::handle_alloc_error(layout);
+    }
+    if census::TYPES.load(Ordering::Relaxed) {
+        census::note(p as usize, name);
     }
     p
 }
@@ -1717,19 +1780,29 @@ pub(crate) fn note_name(p: *const u8, name: &'static str) {
     }
 }
 
-/// Zeroes the `size` bytes at `p`, a slot being handed out, all of them. Inlined where the value
-/// is then stored, the zeroing would otherwise be cut to the bytes that the store leaves alone:
-/// a store of a whole value counts as writing every byte of it, those of an enum's smaller
-/// variant and the padding too, which it leaves as they were, holding the words of the slot's
-/// last object, which then keep what they point to alive (a shared object's `Option<i64>` that is
-/// `None`, over a dead object's pointer). The empty `asm!`, which may read any memory, keeps
-/// every byte's zero.
+/// Zeroes the `size` bytes at `p`, a slot of a free list being handed out, all of them, as a span
+/// is zeroed (`fill_span`). Inlined where the value is then stored, the zeroing would otherwise be
+/// cut to the bytes that the store leaves alone: a store of a whole value counts as writing every
+/// byte of it, those of an enum's smaller variant and the padding too, which it leaves as they
+/// were, holding the words of the slot's last value, which then keep what they point to alive (a
+/// shared object's `Option<i64>` that is `None`, over a dead object's pointer). The empty `asm!`,
+/// which may read any memory, keeps every byte's zero. Up to 128 bytes, word by word rather than
+/// with a call of `memset`: a slot of these sizes is a whole number of words.
 #[inline(always)]
-unsafe fn zero_slot(p: *mut u8, size: usize) {
-    unsafe {
-        ptr::write_bytes(p, 0, size);
-        std::arch::asm!("/* {0} */", in(reg) p, options(nostack, preserves_flags));
+unsafe fn zero_freed(p: *mut u8, size: usize) {
+    if size <= 128 {
+        let mut q = p as *mut u64;
+        let end = unsafe { p.add(size) } as *mut u64;
+        while q < end {
+            unsafe {
+                q.write_volatile(0);
+                q = q.add(1);
+            }
+        }
+    } else {
+        unsafe { ptr::write_bytes(p, 0, size) };
     }
+    unsafe { std::arch::asm!("/* {0} */", in(reg) p, options(nostack, preserves_flags)) };
 }
 
 /// An allocation on a thread whose free lists are gone (while its thread-local storage is
@@ -1747,7 +1820,9 @@ fn allocate_without_lists(class: usize) -> *mut u8 {
             // The block may have more untaken slots.
             h.list(b);
             let m = h.meta(b);
-            return (h.block_address(b) + m.start as usize + slot * m.size as usize) as *mut u8;
+            let p = h.block_address(b) + m.start as usize + slot * m.size as usize;
+            fill_span(class, p, p + m.size as usize);
+            return p as *mut u8;
         }
     }
 }
@@ -3205,14 +3280,32 @@ fn push_old(h: &Heap, marker: &mut Marker, from: usize, to: usize) {
     }
 }
 
+/// The spans the program's threads took since the last collection, those of them under the
+/// heap's lock, and their slots; the counts start again.
+fn span_counts() -> (u64, u64, u64) {
+    let (mut spans, mut locked, mut slots) = (0, 0, 0);
+    for t in &THREADS {
+        if !t.used.load(Ordering::Acquire) {
+            continue;
+        }
+        let lists = unsafe { &*t.lists.get() };
+        spans += lists.spans.replace(0);
+        locked += lists.spans_locked.replace(0);
+        slots += lists.span_slots.replace(0);
+    }
+    (spans, locked, slots)
+}
+
 /// Writes a line about the collection that just ended to standard error, without allocating.
 fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time::Duration) {
     use std::io::Write;
+    let (spans, locked, slots) = span_counts();
     let mut buffer = [0u8; 256];
     let mut out = &mut buffer[..];
     let _ = writeln!(
         out,
-        "[gc {} {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms, scale {}%]",
+        "[gc {} {}: took {} MB, {} MB alive, heap {} MB, mark {} ms, sweep {} ms, scale {}%, \
+         spans {} ({} locked) of {:.1} slots]",
         h.collections,
         if h.minor { "minor" } else { "full" },
         taken >> 20,
@@ -3220,7 +3313,10 @@ fn report(h: &Heap, taken: usize, marked: std::time::Duration, total: std::time:
         (h.top << BLOCK_SHIFT) >> 20,
         marked.as_millis(),
         (total - marked).as_millis(),
-        h.scale
+        h.scale,
+        spans,
+        locked,
+        slots as f64 / spans.max(1) as f64,
     );
     let len = 256 - out.len();
     unsafe { write(2, buffer.as_ptr().cast(), len) };
