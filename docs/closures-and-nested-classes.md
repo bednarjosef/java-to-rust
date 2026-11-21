@@ -463,7 +463,9 @@ borrowed string parameter, `-> Result<_, Throwable>` when the method throws).
   swap the indexes of their consumer, its entity queries that wrap their consumer for each
   section) keeps its parameter lent and its callers' lambdas on their stacks. A lent parameter
   or a local closure is passed as it is, `null` as `None`, and a stored closure as a borrow of
-  what its handle holds (`&**(&op)`, `(&op).as_deref()`), so both forms meet at one call.
+  what its handle holds (`&**(&op)`, `(&op).as_deref()`), so both forms meet at one call; for a
+  closure type that threads share the optional borrow is cast, `(&op).as_deref().map(|f| f as _)`,
+  as its `dyn Fn(..) + Send + Sync` does not coerce to `dyn Fn(..)` inside an `Option`.
 - **Local form**: a local whose every declaration has a lambda as its initializer and that is
   only called and passed to lent parameters (never assigned, captured, otherwise passed,
   returned or used with a default method; `Facts::closure_locals`) is the closure itself,
@@ -591,7 +593,8 @@ below it) is `Arc<dyn Fn(..) -> R + Send + Sync>`, its closures `Arc::new(..)`, 
 in one place (`closure_handle` in `codegen/closures.rs`); what they capture is of shared types by
 the same walk. Other closure types keep `Rc`, also in a program with threads. Corpus:
 `corpus/threads/ClosuresAcrossThreads.java`, `ClosureMethodsAcrossThreads.java`,
-`OperatorsAcrossThreads.java`.
+`OperatorsAcrossThreads.java`, `LentClosuresAcrossThreads.java`, and
+`corpus/whole-program/ReflectedLentClosures.java`.
 
 ## 5. for-each over `Iterable`
 

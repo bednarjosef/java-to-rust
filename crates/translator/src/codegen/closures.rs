@@ -17,7 +17,8 @@
 //! `&(|x: i32| -> i32 { x + k })`, which borrows its captures as a local closure does: no `Rc`
 //! is made or dropped. A capture that holds a lent closure (`Facts::lent_captures`) is the
 //! `&dyn Fn` itself, called and lent on as the parameter is. A stored closure passed to a lent
-//! parameter lends what its handle holds.
+//! parameter lends what its handle holds, cast to the parameter's `dyn Fn` where it may be null
+//! and threads share it.
 //!
 //! In a program with threads, a closure type that a thread can reach (`Facts::thread_shared`)
 //! is `std::sync::Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `std::sync::Arc::new(..)`:
@@ -168,7 +169,12 @@ impl<'a> Gen<'a> {
             _ => {}
         }
         if optional {
-            format!("({}).as_deref()", self.optional_object_ref(e, ty))
+            // The handle of a closure type that threads share holds a `dyn Fn(..) + Send + Sync`,
+            // whose borrow inside an `Option` does not coerce to the parameter's
+            // `Option<&dyn Fn(..)>`: the borrow is cast to it.
+            let shared = self.closure_type(ty).is_none_or(|t| !self.closure_handle(t).1.is_empty());
+            let cast = if shared { ".map(|f| f as _)" } else { "" };
+            format!("({}).as_deref(){cast}", self.optional_object_ref(e, ty))
         } else {
             format!("&**({})", self.object_ref(e))
         }
