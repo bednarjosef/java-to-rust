@@ -846,8 +846,11 @@ fn load_in_rounds(
             Some(taken) => format!(" ({taken} of {round} rounds as an earlier load got them)"),
             None => String::new(),
         };
+        // The time this load took to read the trees that javac gave it: none where every round took
+        // the units of an earlier load.
+        let parsing = source.session.as_ref().map_or(0.0, |session| session.parsing.as_secs_f64());
         eprintln!(
-            "timing: javac: {javac:.3} s, {} units{taken}, {received:.0} MB of trees{memory}",
+            "timing: javac: {javac:.3} s, {} units{taken}, {received:.0} MB of trees, parsed in {parsing:.3} s{memory}",
             units.len()
         );
         eprintln!(
@@ -933,7 +936,11 @@ fn replay(program: &Program, asked: &Asked) -> Result<Vec<Value>, ProgramError> 
     if crate::timings::enabled() {
         let javac = start.elapsed().as_secs_f64();
         let (memory, received) = (crate::timings::memory(), session.received as f64 / 1e6);
-        eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
+        let parsing = session.parsing.as_secs_f64();
+        eprintln!(
+            "timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees, parsed in {parsing:.3} s{memory}",
+            units.len()
+        );
         eprintln!(
             "timing: reach: the reach of the load without the writes of `String[]`s, over the units of its {} rounds",
             asked.0.len()

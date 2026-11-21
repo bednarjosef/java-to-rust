@@ -145,6 +145,21 @@ which it is reached. They only change how the work is ordered:
   all 18 rounds: javac runs once, and the census goes from 317 s to 231 s, 488 to 295 s of CPU
   and 1,862 G to 1,103 G instructions (the JVM's with the translator's), with the same crate,
   tree and report. The Minecraft server's census loads once, so it gains nothing.
+- **javac's trees read on several threads.** javac gives each round's units as one line of JSON,
+  `{"units":[{"file":…},…]}`, which the load read on its own thread while javac waited for the
+  next round: about 12.5 s of the Minecraft server's load. A line of 1 MB or more is now cut into
+  its units, after each `}` followed by `,{"file":"`, and they are read on up to eight threads
+  (`javac::parse_units`; `JAVA_TO_RUST_PARSE_THREADS` sets how many), each into its place, so the
+  units come out in javac's order. A string cannot hold that text, as its quotes would be
+  escaped; a cut inside a unit, at an object of its own whose first field is `file`, leaves a
+  part that reads as no value, and the line is then read whole. The threads intern into the same
+  tables (`value.rs`): the strings are spread over 64 sets by their hash, each behind its own
+  lock, and each thread keeps the strings and the lists of field names it took last in a small
+  table of its own, where most lookups find them without a lock. On javac's census, whose first
+  load reads 435 MB of trees (the later ones take its units), at a load of 30 to 60 on 16 cores,
+  reading them took 3.4 to 4.4 s before and 1.4 to 2.1 s on eight threads, with the same crate,
+  tree and report and no higher peak; on so loaded a machine each thread gets a third to a half
+  of a core.
 
 `whole_objects`, the analysis the old census never got past on javac, was slow for the first
 three of these reasons: the borrowing rounds over name sets, a scan of the program per class for

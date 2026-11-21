@@ -2,8 +2,9 @@
 //! methods, in a fraction of its memory. A `serde_json` object is a `BTreeMap` whose smallest
 //! node has room for eleven entries, each key a `String` of its own, so a node of a few fields
 //! takes over half a kilobyte, about ten times its JSON text. Here an object is a list of its
-//! values beside its fields' names, and every string, key or value, is interned: the few hundred keys and the names and
-//! types that repeat across the units are each held once, for the whole run.
+//! values beside its fields' names, and every string, key or value, is interned: the few hundred
+//! keys and the names and types that repeat across the units are each held once, for the whole
+//! run, in tables that the threads reading a round of javac's trees share (`javac::parse_units`).
 //!
 //! A value is 16 bytes: an interned string is a pointer to the one copy of its text, and the
 //! elements of an array are behind one pointer to their length and items (`ThinVec`). An object
@@ -14,6 +15,7 @@
 //! server's trees about 9 GB.
 
 use std::alloc::Layout;
+use std::cell::Cell;
 use std::fmt;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
@@ -25,17 +27,48 @@ use thin_vec::ThinVec;
 #[derive(Clone, Copy)]
 pub struct Str(&'static &'static str);
 
+/// The number of sets that the interned strings are spread over, by their hash, each behind a
+/// lock of its own: the threads that read a round of javac's trees at once
+/// (`javac::parse_units`) intern their strings without waiting for each other.
+const SHARDS: usize = 64;
+
 /// The strings interned so far.
-static STRINGS: LazyLock<Mutex<crate::analysis::FastSet<Str>>> = LazyLock::new(Default::default);
+static STRINGS: LazyLock<[Mutex<crate::analysis::FastSet<Str>>; SHARDS]> =
+    LazyLock::new(|| std::array::from_fn(|_| Mutex::default()));
+
+/// How many of the strings it interned last each thread keeps (`RECENT`).
+const RECENT_STRINGS: usize = 4096;
+
+thread_local! {
+    /// Strings this thread interned, each at the place its hash gives: the names of fields and
+    /// kinds of node that nearly every node of javac's trees has are found here, without a lock.
+    /// Each was taken from `STRINGS`, so it is the one copy of its text.
+    static RECENT: [Cell<Option<Str>>; RECENT_STRINGS] =
+        const { [const { Cell::new(None) }; RECENT_STRINGS] };
+}
 
 impl Str {
     pub fn new(s: &str) -> Str {
-        let mut strings = STRINGS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(&held) = strings.get(s) {
+        use std::hash::BuildHasher;
+        let hash = std::hash::BuildHasherDefault::<crate::analysis::IndexHasher>::default().hash_one(s);
+        let slot = hash as usize % RECENT_STRINGS;
+        if let Some(held) = RECENT.with(|recent| recent[slot].get())
+            && held.as_str() == s
+        {
             return held;
         }
-        let held = Str(Box::leak(Box::new(&*Box::leak(s.to_owned().into_boxed_str()))));
-        strings.insert(held);
+        // The bits of the hash that choose the set are none of those its table uses.
+        let mut strings = STRINGS[(hash >> 40) as usize % SHARDS].lock().unwrap_or_else(|e| e.into_inner());
+        let held = match strings.get(s) {
+            Some(&held) => held,
+            None => {
+                let held = Str(Box::leak(Box::new(&*Box::leak(s.to_owned().into_boxed_str()))));
+                strings.insert(held);
+                held
+            }
+        };
+        drop(strings);
+        RECENT.with(|recent| recent[slot].set(Some(held)));
         held
     }
 
@@ -232,17 +265,44 @@ static EMPTY: Header = Header { keys: &[] };
 /// The lists of field names held so far, each once (`Map::keys`).
 static KEYS: LazyLock<Mutex<crate::analysis::FastSet<&'static [Str]>>> = LazyLock::new(Default::default);
 
+/// How many of the lists of field names it held last each thread keeps (`RECENT_KEYS`).
+const RECENT_KEY_LISTS: usize = 1024;
+
+thread_local! {
+    /// Lists of field names this thread held, each at the place that the places of its names
+    /// give: javac's trees have a few hundred, which every object takes one of. Each was taken
+    /// from `KEYS`, so it is the one copy of its names.
+    static RECENT_KEYS: [Cell<&'static [Str]>; RECENT_KEY_LISTS] =
+        const { [const { Cell::new(&[]) }; RECENT_KEY_LISTS] };
+}
+
 /// The one copy of the names `keys`.
 fn held_keys(keys: &[Str]) -> &'static [Str] {
+    use std::hash::Hasher;
     if keys.is_empty() {
         return &[];
     }
-    let mut held = KEYS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(&found) = held.get(keys) {
-        return found;
+    // Interned names are the same exactly when they are at the same place.
+    let mut hasher = crate::analysis::IndexHasher::default();
+    for key in keys {
+        hasher.write_usize(std::ptr::from_ref(key.0).addr());
     }
-    let found: &'static [Str] = Box::leak(keys.to_vec().into_boxed_slice());
-    held.insert(found);
+    let slot = hasher.finish() as usize % RECENT_KEY_LISTS;
+    let recent = RECENT_KEYS.with(|recent| recent[slot].get());
+    if recent == keys {
+        return recent;
+    }
+    let mut held = KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    let found = match held.get(keys) {
+        Some(&found) => found,
+        None => {
+            let found: &'static [Str] = Box::leak(keys.to_vec().into_boxed_slice());
+            held.insert(found);
+            found
+        }
+    };
+    drop(held);
+    RECENT_KEYS.with(|recent| recent[slot].set(found));
     found
 }
 
@@ -1260,6 +1320,46 @@ mod tests {
         emptied.remove("k");
         assert!(emptied.is_empty());
         assert_eq!(emptied, Map::new());
+    }
+
+    #[test]
+    fn strings_and_names_interned_on_several_threads_are_one_copy_each() {
+        // Each text five times, interned by each thread in an order of its own.
+        let texts: Vec<String> = (0..25_000).map(|i| format!("interned on threads {}", i % 5_000)).collect();
+        let names: Vec<Vec<String>> =
+            (0..2_000).map(|i| (0..1 + i % 4).map(|k| format!("field {} {k}", i % 400)).collect()).collect();
+        let found: Vec<(Vec<usize>, Vec<usize>)> = std::thread::scope(|scope| {
+            let threads: Vec<_> = (0..8)
+                .map(|t| {
+                    let (texts, names) = (&texts, &names);
+                    scope.spawn(move || {
+                        let order = |n: usize| (0..n).map(move |i| (i + t * 997) % n);
+                        let mut strings = vec![0; texts.len()];
+                        for i in order(texts.len()) {
+                            strings[i] = Str::new(&texts[i]).as_str().as_ptr().addr();
+                        }
+                        let mut lists = vec![0; names.len()];
+                        for i in order(names.len()) {
+                            let keys: Vec<Str> = names[i].iter().map(|n| Str::new(n)).collect();
+                            lists[i] = held_keys(&keys).as_ptr().addr();
+                        }
+                        (strings, lists)
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        for other in &found[1..] {
+            assert_eq!(other, &found[0]);
+        }
+        let (strings, lists) = &found[0];
+        assert!((0..texts.len()).all(|i| strings[i] == strings[i % 5_000]));
+        // The same names are the same list, as the list of the first index with them.
+        let mut first = std::collections::HashMap::new();
+        for (i, list) in names.iter().enumerate() {
+            assert_eq!(lists[i], lists[*first.entry(list).or_insert(i)]);
+        }
+        assert_eq!(first.len(), 400);
     }
 
     #[test]
