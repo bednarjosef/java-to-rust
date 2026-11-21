@@ -58,6 +58,8 @@ struct Saved<'a> {
     elements: HashMap<ExprId, String>,
     views: HashMap<ExprId, String>,
     loop_fields: HashMap<ExprId, String>,
+    unnamed_locals: HashMap<String, ExprId>,
+    named: Vec<String>,
     sliced: HashMap<String, (String, usize)>,
     sliced_accesses: HashSet<ExprId>,
     out: String,
@@ -656,6 +658,9 @@ impl<'a> Gen<'a> {
             elements: std::mem::take(&mut self.elements),
             views: std::mem::take(&mut self.views),
             loop_fields: std::mem::take(&mut self.loop_fields),
+            // The locals that name no object yet are the enclosing method's.
+            unnamed_locals: std::mem::take(&mut self.unnamed_locals),
+            named: std::mem::take(&mut self.named),
             sliced: std::mem::take(&mut self.sliced),
             sliced_accesses: std::mem::take(&mut self.sliced_accesses),
             out: std::mem::take(&mut self.out),
@@ -699,6 +704,8 @@ impl<'a> Gen<'a> {
         self.elements = s.elements;
         self.views = s.views;
         self.loop_fields = s.loop_fields;
+        self.unnamed_locals = s.unnamed_locals;
+        self.named = s.named;
         self.sliced = s.sliced;
         self.sliced_accesses = s.sliced_accesses;
         self.out = s.out;

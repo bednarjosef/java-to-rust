@@ -378,6 +378,27 @@ object, so no code can write its fields, and the local is their value. The rando
 each random tick of the Minecraft server is read so, and moves to the heap later, when a block
 that ticks keeps it.
 
+**A handle that names no object until the object leaves.** With its fields in locals, a moved
+object's slot is read by nothing but a move, yet the compiler still writes every field into it
+on every path: the handle that `put` gave holds the slot's address, as a number once it carries
+a class number, and a move hands the slot to code out of line, so for the compiler the slot is
+memory that any call may read, where a store must be made before the next call whether a move
+follows or not. So where the local is mentioned nowhere but in the reads that the locals took
+over and in the statements that a move comes before, none of them guarded, its handle is made to
+name no object right after those reads, `pos = unsafe { slot_1.unnamed_of_class(pos) };` (`unnamed`
+for a handle that is the address alone): its address becomes one that is no object's, its class
+number stays. A move, `slot_1.to_heap_unnamed(&mut pos)`, makes a handle that names no object
+name a copy of the slot's object in the heap, and leaves one that names the copy as it is; the
+copy is made of the object's value, read where the compiler sees the slot, so the slot's address
+goes nowhere at all. The slot is then a local like any other: its fields stay in registers, and
+the object is written only where it is copied, as Java's compiler writes an object that leaves
+on a rare path only there. Nothing reads through the handle before a move, since every mention
+of the local is one of those reads or comes after a move in its statement; should the generator
+name the local anywhere else while it writes the method, it writes the method again with the
+object in the heap (`Gen::local`). `benchmarks/RandomTickPositions.java` runs 754 instead of 843
+million instructions. A local that is also read after a place where it may have left, given to
+a call that only reads it, or compared, keeps the slot's handle.
+
 A slot holds an object of a class that is not a Rust generic, an owned value or a closure, and
 of at most about 128 bytes of fields (16 references, or 32 `int`s), and a method's slots take
 at most about 1 KB, eight of the largest, so that a method that recursion runs deep keeps a

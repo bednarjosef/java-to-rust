@@ -841,6 +841,10 @@ impl<'a> Gen<'a> {
             slots: HashMap::new(),
             slot_param: String::new(),
             filled: HashSet::new(),
+            unnamed: HashSet::new(),
+            unnamed_locals: HashMap::new(),
+            named: Vec::new(),
+            misnamed: std::cell::RefCell::new(Vec::new()),
             moves: stack_objects::Moves::default(),
             unmoved: HashSet::new(),
             missed: Vec::new(),
@@ -1218,6 +1222,19 @@ struct Gen<'a> {
     /// The `new`s and calls of factories just written that are sure to have put their object in
     /// their slot, whose fields may then be read from it (`stack_objects::bind_slot_fields`).
     filled: HashSet<ExprId>,
+    /// The `new`s and calls of factories just written whose local was made to name no object
+    /// until a move makes it name a copy in the heap (`stack_objects::unname_slot_object`).
+    unnamed: HashSet<ExprId>,
+    /// The locals in scope whose handles name no object until a move, by their Java names, with
+    /// the `new` or call that made each one's object.
+    unnamed_locals: HashMap<String, ExprId>,
+    /// Those of `unnamed_locals` that a move was written for before the statement being written,
+    /// which may then name them.
+    named: Vec<String>,
+    /// The objects whose local was named (`local`) while it named no object: a mention that
+    /// `unname_slot_object` did not see. Their methods are written again with them in the heap,
+    /// as for a move that was not written (`missed`).
+    misnamed: std::cell::RefCell<Vec<ExprId>>,
     /// The moves to the heap of the method being written (see `stack_objects::Moves`).
     moves: stack_objects::Moves,
     /// The objects that a move was not written for, which their methods, written again, make in
@@ -1290,6 +1307,12 @@ impl<'a> Gen<'a> {
     }
 
     fn local(&self, java: &str) -> String {
+        // A local that names no object yet is named only in a statement after its move.
+        if let Some(&made) = self.unnamed_locals.get(java)
+            && !self.named.iter().any(|named| named == java)
+        {
+            self.misnamed.borrow_mut().push(made);
+        }
         self.locals.get(java).cloned().unwrap_or_else(|| snake_case(java))
     }
 
@@ -1492,7 +1515,10 @@ impl<'a> Gen<'a> {
             (self.out.len(), self.indent, self.closures.len(), self.rejected.len());
         loop {
             self.method_form_once(index);
-            let missed = std::mem::take(&mut self.missed);
+            let mut missed = std::mem::take(&mut self.missed);
+            missed.extend(self.misnamed.take());
+            self.unnamed_locals.clear();
+            self.named.clear();
             if missed.is_empty() {
                 return;
             }

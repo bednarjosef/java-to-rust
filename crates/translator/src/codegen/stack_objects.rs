@@ -35,6 +35,12 @@
 //! fields that the rest of its block reads before the variable is used otherwise read from the
 //! slot right after its declaration, `let p_x = *unsafe { slot_1.object() }.x.fixed();`, and
 //! those reads, also by getters, read the locals (`Gen::bind_slot_fields`).
+//!
+//! When such a local is then used nowhere but in the statements that a move comes before, its
+//! handle is made to name no object, `p = unsafe { slot_1.unnamed(p) };`, and each move makes it
+//! name a copy of the object in the heap, `unsafe { slot_1.to_heap_unnamed(&mut p) };`
+//! (`Gen::unname_slot_object`): no handle holds the slot's address, so the compiler keeps the
+//! object's fields in registers and writes the object only where it is moved.
 
 use super::objects::changes_object;
 use super::*;
@@ -467,22 +473,30 @@ impl<'a> Gen<'a> {
 
     /// Writes the moves to the heap that come before `stmt` (`Slot::to_heap`): of each object in
     /// a slot that may leave the method in it, held by a local. A guarded move (`Guard`) is made
-    /// only when the receiver of its call is not of the guard's class.
-    pub(super) fn move_to_heap(&mut self, stmt: &'a Stmt) {
+    /// only when the receiver of its call is not of the guard's class. A local that named no
+    /// object until its move (`unname_slot_object`) may be named in `stmt`: the caller forgets
+    /// that after the statement, by cutting `named` back to the length given here.
+    pub(super) fn move_to_heap(&mut self, stmt: &'a Stmt) -> usize {
+        let named = self.named.len();
         let (Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) | Stmt::Return(Some(e), _) | Stmt::Yield(e)) =
             stmt
         else {
-            return;
+            return named;
         };
-        let Some(moves) = self.moves.before.get(&e.id).cloned() else { return };
+        let Some(moves) = self.moves.before.get(&e.id).cloned() else { return named };
         for (var, slot, made, guard) in moves {
             // A variable that is not a plain local here is not moved: the method is then written
             // again with the object in the heap (`missed`).
             if !self.locals.contains_key(&var) || self.borrowed.contains(&var) || self.plain(&var).is_some() {
                 continue;
             }
+            let unnamed = self.unnamed.contains(&made);
+            if unnamed {
+                self.named.push(var.clone());
+            }
             let rust = self.local(&var);
-            let line = format!("unsafe {{ {slot}.to_heap(&mut {rust}) }};");
+            let to_heap = if unnamed { "to_heap_unnamed" } else { "to_heap" };
+            let line = format!("unsafe {{ {slot}.{to_heap}(&mut {rust}) }};");
             // A guard that cannot be written here leaves the move unguarded, which is only slower.
             match guard.and_then(|g| self.receiver_of_class(e, g)) {
                 Some(test) => self.line(&format!("if !{test} {{ {line} }}")),
@@ -490,6 +504,7 @@ impl<'a> Gen<'a> {
             }
             self.moves.written.insert((e.id, made));
         }
+        named
     }
 
     /// The test that the receiver of the guard's call in `e`, a local, is of the guard's class
@@ -531,8 +546,115 @@ impl<'a> Gen<'a> {
         };
         self.slots.contains_key(&site.id).then(|| {
             self.filled.remove(&site.id);
+            self.unnamed.remove(&site.id);
             site
         })
+    }
+
+    /// After `stmt`, which declares `v` with the object that `site` made in its slot, and
+    /// `bind_slot_fields`, which had the reads `reads` in the statements after it, `rest`, read
+    /// the object's fields from the slot: when the method moves the object to the heap before
+    /// every statement where it may leave (`Moves`), and `v` is mentioned nowhere else but in
+    /// those reads, makes `v` name no object, `v = unsafe { slot_1.unnamed(v) };`, and notes the
+    /// object in `unnamed`, for whose moves `move_to_heap` writes `to_heap_unnamed`, which makes
+    /// `v` name a copy of the object in the heap. Gives back `v` when it did, which is then in
+    /// `unnamed_locals` until the caller takes it out at the end of its block: while it is
+    /// there, naming it outside a statement that a move was written for (`Gen::local`) makes the
+    /// method be written again with the object in the heap.
+    ///
+    /// The handle that `put` gave holds the slot's address, as a number once it carries a class
+    /// number, and `to_heap` hands the slot to code out of line: for the compiler the object is
+    /// then one that any call may read, so it writes every field into the slot on every path,
+    /// though only a move reads them back. With the address in no handle, the slot is a local
+    /// like any other: its fields stay in registers, and the object is written only where it is
+    /// copied to the heap, as Java's compiler does with an object that leaves on a rare path.
+    ///
+    /// Until a move, no code reads through `v`, compares or hashes it: every mention of `v` is
+    /// the object of a read that `bind_slot_fields` gave a local, which reads the slot, or is in
+    /// a statement that a move of the object comes before, where `v` names the copy. A guarded
+    /// move, which leaves the object in its slot for the receiver's usual class, whose call is
+    /// then given `v`, leaves `v` as it is.
+    pub(super) fn unname_slot_object(
+        &mut self,
+        stmt: &'a Stmt,
+        site: &'a Expr,
+        rest: &'a [Stmt],
+        reads: &[ExprId],
+    ) -> Option<&'a str> {
+        let Stmt::Local { ty, name: var, .. } = stmt else { return None };
+        let (slot, c) = self.slots.get(&site.id).cloned()?;
+        if !self.filled.contains(&site.id)
+            || !self.locals.contains_key(var.as_str())
+            || self.borrowed.contains(var.as_str())
+            || self.plain(var).is_some()
+        {
+            return None;
+        }
+        // The statements that a move of the object comes before: every one moves this variable,
+        // unguarded.
+        let mut moved_at: HashSet<ExprId> = HashSet::new();
+        for (at, moves) in &self.moves.before {
+            for (moved, _, made, guard) in moves {
+                if *made != site.id {
+                    continue;
+                }
+                if moved != var || guard.is_some() {
+                    return None;
+                }
+                moved_at.insert(*at);
+            }
+        }
+        if moved_at.is_empty() {
+            return None;
+        }
+        let mentions = |x: &Expr| match &x.kind {
+            ExprKind::Var(v) => v == var,
+            ExprKind::Assign { target: Place::Var(v), .. }
+            | ExprKind::IncDec { target: Place::Var(v), .. } => v == var,
+            _ => false,
+        };
+        // The mentions of the variable that a move comes before, or that are the objects of the
+        // reads that read the slot.
+        let mut allowed: HashSet<*const Expr> = HashSet::new();
+        let mut all: Vec<*const Expr> = Vec::new();
+        for s in rest {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                if let Stmt::Local { init: Some(e), .. }
+                | Stmt::Expr(e)
+                | Stmt::Return(Some(e), _)
+                | Stmt::Yield(e) = s
+                    && moved_at.contains(&e.id)
+                {
+                    visit_expr(e, &mut |x| {
+                        if mentions(x) {
+                            allowed.insert(x as *const Expr);
+                        }
+                    });
+                }
+            });
+            visit_stmt_exprs(s, &mut |x| {
+                if mentions(x) {
+                    all.push(x as *const Expr);
+                }
+                if reads.contains(&x.id)
+                    && let Some((_, _, on)) = self.slot_field_read(x, var, c)
+                {
+                    allowed.insert(on);
+                }
+            });
+        }
+        if all.iter().any(|mention| !allowed.contains(mention)) {
+            return None;
+        }
+        let rust = self.local(var);
+        // A local of the type of one class holds the object's address alone; any other handle
+        // carries its class number in its top bits, which it keeps.
+        let address_alone = self.class.class_index(*ty).is_some_and(|t| self.enum_for(t).is_none());
+        let unnamed = if address_alone { "unnamed" } else { "unnamed_of_class" };
+        self.line(&format!("{rust} = unsafe {{ {slot}.{unnamed}({rust}) }};"));
+        self.unnamed.insert(site.id);
+        self.unnamed_locals.insert(var.clone(), site.id);
+        Some(var.as_str())
     }
 
     /// After `stmt`, which declares `v` with the object that `site` made in its slot: reads the
