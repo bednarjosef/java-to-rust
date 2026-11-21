@@ -355,6 +355,7 @@ fn lower_into<'t>(
     main: &str,
     real: Option<&super::real_generics::Real>,
 ) -> Result<(Class, super::real_generics::Real, super::real_generics::Real), (Option<usize>, Error)> {
+    let mut steps = crate::timings::steps("lowering");
     // The unit and the package of each class, in `Class::types` order.
     let mut packages = Vec::new();
     for (index, unit) in units.iter().enumerate() {
@@ -431,29 +432,36 @@ fn lower_into<'t>(
         })
         .collect();
     let planned: Vec<Node> = decls.iter().copied().chain(lowering.functional_decls()).collect();
+    steps.step("declarations");
     lowering.start_real(real);
     lowering.plan_object(&planned);
     lowering.predict_arrays();
+    steps.step("plans");
     let mut types = Vec::new();
     for (t, package) in packages.into_iter().enumerate() {
         let mut decl = lowering.type_decl_or_stub(t).map_err(|e| (unit(t), e))?;
         decl.package = package;
         types.push(decl);
     }
+    steps.step("types");
     let mut methods: Vec<Method> = (0..lowering.methods.len())
         .map(|m| lowering.method_or_stub(m).map_err(|e| (unit(lowering.methods[m].owner), e)))
         .collect::<Result<_, _>>()?;
+    steps.step("methods");
     lowering.suppress_checks(&mut methods);
     lowering.init_cause_checks(&mut methods);
     lowering.object_methods(&mut methods).map_err(|e| (None, e))?;
     lowering.finish_types(&mut types, &mut methods).map_err(|(t, e)| (unit(t), e))?;
     lowering.object_types(&mut types);
     lowering.param_decls(&mut types);
+    steps.step("finishing");
     let mut failed = lowering.verify(&types, &methods);
     lowering.noted_later(&mut failed);
+    steps.step("generics checks");
     let hierarchy = Hierarchy::new(&types, &methods);
     let raised = lowering.raised_objects(&types, &methods);
     let class_file = lowering.class_file_names(&types);
+    steps.step("hierarchy");
     let notes = lowering.notes.take();
     let annotation_classes = lowering.annotation_classes.take();
     let class = Class {
@@ -480,6 +488,7 @@ fn lower_into<'t>(
         reflection_table: lowering.reflection_table(),
         construction_methods: Default::default(),
     };
+    steps.step("class");
     Ok((class, lowering.real.clone(), failed))
 }
 

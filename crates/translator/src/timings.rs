@@ -39,6 +39,30 @@ pub fn phase<T>(phase: &str, f: impl FnOnce() -> T) -> T {
     result
 }
 
+/// Steps of one phase timed one after another (`steps`).
+pub struct Steps {
+    phase: &'static str,
+    last: Instant,
+}
+
+/// Starts timing the steps of `phase`: each `Steps::step` prints, when timings are on, the time
+/// since the last step (or since this call) as `phase: step`, with the memory used so far.
+pub fn steps(phase: &'static str) -> Steps {
+    Steps { phase, last: Instant::now() }
+}
+
+impl Steps {
+    /// Prints the time since the last step as the step `step`.
+    pub fn step(&mut self, step: &str) {
+        if !enabled() {
+            return;
+        }
+        let took = self.last.elapsed().as_secs_f64();
+        eprintln!("timing: {}: {step}: {took:.3} s{}", self.phase, memory());
+        self.last = Instant::now();
+    }
+}
+
 /// The memory used so far, as `, peak 1.23 GB (now 0.98 GB), javac peak 2.34 GB`, or nothing where
 /// `/proc` is not there.
 pub fn memory() -> String {
