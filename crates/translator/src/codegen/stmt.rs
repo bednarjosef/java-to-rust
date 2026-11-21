@@ -152,20 +152,26 @@ impl<'a> Gen<'a> {
     }
 
     fn while_loop(&mut self, cond: &'a Expr, body: &'a Stmt) {
+        // Each pass of the body runs after the condition.
+        let known = self.known_init.len();
         if matches!(cond.kind, ExprKind::Bool(true)) {
             self.line("loop {");
         } else if let Some((cond_text, narrowed)) = self.let_chain(cond, &[body], &[]) {
+            self.after_operand(cond);
             self.line(&format!("while {cond_text} {{"));
             self.loop_body(Loop::Plain, body, &[]);
             self.line("}");
             self.unnarrow(narrowed);
+            self.known_init.truncate(known);
             return;
         } else {
             let cond_text = self.condition(cond);
+            self.after_operand(cond);
             self.line(&format!("while {cond_text} {{"));
         }
         self.loop_body(Loop::Plain, body, &[]);
         self.line("}");
+        self.known_init.truncate(known);
     }
 
     fn do_while_loop(&mut self, body: &'a Stmt, cond: &'a Expr) {

@@ -760,7 +760,11 @@ impl<'a> Gen<'a> {
         let each = self.runtime("each");
         let wrap = if self.wrap_each(name, element(array.ty)) { ".map(Some)" } else { "" };
         self.line(&format!("for {mutable}{var} in {each}({source}){wrap} {{"));
+        // The body runs after the array is computed.
+        let known = self.known_init.len();
+        self.after_operand(array);
         self.loop_body(Loop::Plain, body, &[]);
+        self.known_init.truncate(known);
         self.line("}");
     }
 

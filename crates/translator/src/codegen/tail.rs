@@ -135,6 +135,9 @@ impl<'a> Gen<'a> {
             return;
         }
         let (cond_text, narrowed) = self.guard(cond, then);
+        // The branches, and the conditions of the `else if`s, run after the condition.
+        let known = self.known_init.len();
+        self.after_operand(cond);
         self.line(&format!("if {cond_text} {{"));
         self.nested_in(then, tail);
         self.unnarrow(narrowed);
@@ -159,6 +162,7 @@ impl<'a> Gen<'a> {
                 let outer = std::mem::replace(&mut self.guarded, conflicts);
                 let (cond_text, narrowed) = self.guard(cond, then);
                 self.guarded = outer;
+                self.after_operand(cond);
                 self.line(&format!("}} else if {cond_text} {{"));
                 self.nested_in(then, tail);
                 self.unnarrow(narrowed);
@@ -170,6 +174,7 @@ impl<'a> Gen<'a> {
             }
         }
         self.line("}");
+        self.known_init.truncate(known);
     }
 }
 

@@ -469,9 +469,11 @@ its enum constants, or a call or `new` of one of its static methods or construct
 with the check, which the statement evaluates whatever path it takes (not past `&&`, `||` or
 `?`, nor in a lambda). That statement's block and the blocks inside it skip the check: once one
 check passed, the class is initialized or this thread is running its initialization, so a
-second one would pass too. So do the operands of an expression that run after one that surely
-initialized it (`after_operand`): a call's later arguments and the call itself, and an operator's
-right operand, which Rust runs in the order they are written, as Java does, so that
+second one would pass too. So does the code of the same statement that runs after a part that
+surely initialized it (`after_operand`): a call's later arguments and the call itself, an
+operator's right operand, which Rust runs in the order they are written, as Java does, and the
+branches of an `if` and the body of a `while` or of a loop over an array, which run after the
+condition or the array, so that
 `getChunk(SectionPos.blockToSectionCoord(pos.getX()), SectionPos.blockToSectionCoord(pos.getZ()))`
 checks `SectionPos` once. Not the arguments of a call that is inlined, which its body may bind in
 another order, nor code written as lines ahead of the statement, such as a native's arguments

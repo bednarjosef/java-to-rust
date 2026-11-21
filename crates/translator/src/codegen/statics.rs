@@ -643,10 +643,12 @@ impl<'a> Gen<'a> {
 
     /// Marks the classes that operand `done` surely initialized, once it completed normally, as
     /// known to be initialized (`known_init`), for the operands written after it that run only
-    /// after it (`surely_initializes`): the later arguments of a call (`call_args`) and the right
-    /// operand of a binary operator. Rust runs a call's arguments and an operator's operands in
-    /// the order they are written, which is Java's. The caller forgets them (`truncate`) once it
-    /// has written those operands, as the code around it may run before `done`.
+    /// after it (`surely_initializes`): the later arguments of a call (`call_args`), the right
+    /// operand of a binary operator, the branches of an `if` after its condition (`if_stmt`), and
+    /// the body of a `while` after its condition or of a loop over an array after the array. Rust
+    /// runs a call's arguments and an operator's operands in the order they are written, which is
+    /// Java's. The caller forgets them (`truncate`) once it has written that code, as the code
+    /// around it may run before `done`.
     pub(super) fn after_operand(&mut self, done: &Expr) {
         let mut found = Vec::new();
         self.surely_initializes(done, &mut found);

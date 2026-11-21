@@ -2965,6 +2965,72 @@ fn a_class_checked_by_an_earlier_operand_is_not_checked_again() {
 }
 
 #[test]
+fn a_class_checked_by_a_condition_is_not_checked_in_its_branches() {
+    let rust = translate(
+        "class Sec {
+            static int shift;
+            static { shift = 4; System.out.println(\"sec\"); }
+            static int toSection(int v) { return v >> shift; }
+            static boolean inside(int v) { return v >= 0; }
+            static int[] spread(int[] a) { return a; }
+        }
+        public class A {
+            static int clamp(int x, int z) {
+                int r = 0;
+                if (Sec.inside(x)) {
+                    r = Sec.toSection(x);
+                } else if (Sec.inside(z)) {
+                    r = Sec.toSection(z);
+                }
+                return r;
+            }
+            static int maybe(int x, int y) {
+                int r = 0;
+                if (x > 5 && Sec.inside(y)) {
+                    r = Sec.toSection(y);
+                }
+                return r;
+            }
+            static int count(int x) {
+                int n = 0;
+                while (Sec.inside(x)) {
+                    x -= Sec.toSection(16);
+                    n++;
+                }
+                return n;
+            }
+            static int total(int[] base) {
+                int t = 0;
+                for (int v : Sec.spread(base)) {
+                    t += Sec.toSection(v);
+                }
+                return t;
+            }
+            public static void main(String[] args) {
+                int n = args.length;
+                System.out.println(clamp(n, n - 1) + maybe(n, 3) + count(40) + total(new int[] { 16, 32 }));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // The branches of an `if`, and the conditions of its `else if`s, run after its
+            // condition.
+            "to_section__initialized(x)",
+            "inside__initialized(z)",
+            "to_section__initialized(z)",
+            // What runs only past `&&` may not run: the branch checks.
+            "to_section(y)",
+            // The body of a `while` runs after its condition, and that of a loop over an array
+            // after the array.
+            "to_section__initialized(16)",
+            "to_section__initialized(v)",
+        ],
+    );
+}
+
+#[test]
 fn an_enum_method_called_after_its_enum_is_checked_skips_the_check() {
     let rust = translate(
         "enum Axis { X, Y, Z }

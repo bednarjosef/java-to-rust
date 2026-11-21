@@ -1,8 +1,10 @@
-// Classes that one operand of an expression initializes and a later operand uses again: a call's
-// later arguments and the call itself, the right operand of an operator, past `&&`, and the
-// methods of an enum whose fields are tables, called after one call checked it. The static blocks
-// print in Java's order whichever check the translation leaves out, and a use after an operand
-// that may not run (a branch of `?:`, what follows `&&`) still initializes its class.
+// Classes that one part of a statement initializes and a later part uses again: a call's later
+// arguments and the call itself, the right operand of an operator, past `&&`, the branches of an
+// `if` after its condition, the body of a `while` after its condition and of a loop over an array
+// after the array, and the methods of an enum whose fields are tables, called after one call
+// checked it. The static blocks print in Java's order whichever check the translation leaves out,
+// and a use after a part that may not run (a branch of `?:`, what follows `&&`) still initializes
+// its class.
 public class ClassInitChecksWithinStatements {
     static class Log {
         static int count;
@@ -58,6 +60,34 @@ public class ClassInitChecksWithinStatements {
         Box(long a, long b) {
             made++;
             key = a * 31 + b;
+        }
+    }
+
+    static class Cond {
+        static int seen = Log.note("Cond", 5);
+
+        static boolean small(int v) {
+            return v < 10 + seen;
+        }
+
+        static int twice(int v) {
+            return 2 * v;
+        }
+
+        static int[] steps(int n) {
+            int[] a = new int[n];
+            for (int i = 0; i < n; i++) {
+                a[i] = i + seen;
+            }
+            return a;
+        }
+    }
+
+    static class Late {
+        static int base = Log.note("Late", 6);
+
+        static int add(int v) {
+            return v + base;
         }
     }
 
@@ -153,6 +183,32 @@ public class ClassInitChecksWithinStatements {
         return (b ? Branchy.value(x) : 0) + Branchy.value(x);
     }
 
+    static int conditions(int x) {
+        int r = 0;
+        if (Cond.small(x)) {
+            r = Cond.twice(x);
+        } else if (Cond.small(x - 10)) {
+            r = Cond.twice(x - 10);
+        }
+        int n = 0;
+        while (Cond.small(r + n)) {
+            n += Cond.twice(1);
+        }
+        for (int v : Cond.steps(3)) {
+            r += Cond.twice(v);
+        }
+        return r * 100 + n;
+    }
+
+    static int lateBranch(int x) {
+        // With x at most 3 the condition does not run `add`, and the `else` initializes Late.
+        if (x > 3 && Late.add(x) > 0) {
+            return 1;
+        } else {
+            return Late.add(0);
+        }
+    }
+
     static long boxed(int x) {
         return new Box(Sections.toSection(x), Box.made).key + Box.made;
     }
@@ -169,5 +225,7 @@ public class ClassInitChecksWithinStatements {
         }
         System.out.println("total " + total + " made " + Box.made + " cells " + Grid.cells);
         System.out.println("walk " + walk(Dir.values(), 10));
+        System.out.println("late " + lateBranch(1) + " " + lateBranch(5));
+        System.out.println("conditions " + conditions(3) + " " + conditions(20));
     }
 }
