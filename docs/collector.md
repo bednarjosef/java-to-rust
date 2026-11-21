@@ -526,8 +526,9 @@ keeps (`gc/references.rs`, `weak.rs`).
   load.
 - **Threads stopped mid-read.** Threads are stopped by a signal wherever they are, so one may be
   stopped between loading a referent's inverted word and decoding it. Once any reference is
-  registered, every root word is therefore also read inverted, which may keep a referent for one
-  more collection, never lose one.
+  registered, every word of the threads' stacks and registers is therefore also read inverted,
+  which may keep a referent for one more collection, never lose one. Thread-locals, like
+  statics, are memory the program writes, never a load in progress, and are read once.
 
 What a program can see: a referent that nothing else keeps is cleared at some collection after
 the last strong use, as on a JVM; when depends on when the collector runs, which here is when the
@@ -551,9 +552,11 @@ thread unregisters when it ends; its later frees during its exit go straight bac
 - `JAVA_GC_THREADS=<n>` marks with `n` markers in all, and with more than one marks in parallel
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
 - `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,
-  bytes taken since the last, bytes alive, heap size, the time spent marking and sweeping, and
-  the spans the threads took since the last (those under the heap's lock, the rest from the
-  bits beyond a run, `span_from_rest`) with their slots on average.
+  bytes taken since the last, bytes alive, heap size, the time spent marking and sweeping, the
+  scale, the spans the threads took since the last (those under the heap's lock, the rest from
+  the bits beyond a run, `span_from_rest`) with their slots on average, and the bytes of each
+  kind of root (statics, thread-locals, stacks) and the time their scans took, apart from marking
+  what they reach, and how many markers marked and the share of their time they had no work.
   `JAVA_GC_LOG=2` adds, after each full collection, the bytes alive in each slot size and in
   large allocations, and the blocks each takes.
 - `JAVA_GC_GENERATIONS=1` with `JAVA_GC_EVERY=1` makes most collections minor ones, at every
