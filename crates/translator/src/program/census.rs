@@ -50,7 +50,9 @@
 
 use super::checkpoint;
 use super::survey::{self, Part, Piece};
-use super::{Program, ProgramError, Reach, Reaching, Writes, class_file_names, load, source_files};
+use super::{
+    Earlier, Program, ProgramError, Reach, Reaching, Transcript, Writes, class_file_names, load, source_files,
+};
 use crate::ast::{
     Builtin, Class, Error, Expr, ExprId, ExprKind, Method, PROVIDED_UNIT, Pos, Stmt, TableKind, Type,
     visit_expr, visit_stmt, visit_stmt_exprs,
@@ -151,48 +153,65 @@ struct Rejection {
 /// `String` arrays as `Object` arrays (`Reach::string_array_writes`), as a translation decides
 /// (`super::translate_program_modules`).
 pub fn census_program(program: &Program) -> Result<Census, ProgramError> {
+    census_after(program, None)
+}
+
+/// `census_program`, whose load takes the units that javac gave an earlier load of the program
+/// (`super::Earlier`) where it asks for the same: one of a census taken again with classes that
+/// its reflection table missed.
+fn census_after(program: &Program, earlier: Option<Earlier>) -> Result<Census, ProgramError> {
     if let Some(lowered) = checkpoint::load(program) {
         let hook = std::panic::take_hook();
         lower::quiet_panics();
         return Ok(analysed(program, lowered, hook));
     }
-    let (units, reach, asked) = load(program, Reaching::Walk(false))?;
+    let (units, reach, asked, transcript) = load(program, Reaching::Walk(false), earlier)?;
     // When a walk with the writes would reach the same, the census is first taken with them.
     let same = asked.is_some();
     let mut writes = if same { Writes::First } else { Writes::Without };
-    let mut loaded = (units, reach);
+    let mut loaded = (units, reach, transcript);
     loop {
         match census_reached(program, loaded, writes, same)? {
             Taken::Census(census) => return Ok(census),
-            Taken::Flow(missing) => return census_program(&super::with_flow_classes(program, missing)),
-            Taken::Again(Some(again), next) => (loaded, writes) = (*again, next),
-            Taken::Again(None, next) => {
-                let (units, reach, _) = load(program, Reaching::Walk(true))?;
-                (loaded, writes) = ((units, reach), next);
+            Taken::Flow(missing, earlier) => {
+                return census_after(&super::with_flow_classes(program, missing), earlier);
+            }
+            Taken::Again(again, next) => (loaded, writes) = (*again, next),
+            Taken::Reload(earlier, next) => {
+                let (units, reach, _, transcript) = load(program, Reaching::Walk(true), earlier)?;
+                (loaded, writes) = ((units, reach, transcript), next);
             }
         }
     }
 }
 
-/// What `census_reached` gives: the census, or the census to take instead, over these units and
-/// reach or, with none, over a load with the writes of `String` arrays, or over the program with
-/// the classes missing from its reflection table (`super::with_flow_classes`).
+/// The units of a load and what they reach (`super::load`), with what javac gave the load.
+type Loaded = (Vec<Value>, Reach, Option<Transcript>);
+
+/// What `census_reached` gives: the census, or the census to take instead.
 enum Taken {
     Census(Census),
-    Again(Option<Box<(Vec<Value>, Reach)>>, Writes),
-    Flow(Vec<(TableKind, String)>),
+    /// Over these units and reach, with the writes of `String` arrays as `Writes` says.
+    Again(Box<Loaded>, Writes),
+    /// Over a load with the writes of `String` arrays, which takes the units that javac gave this
+    /// one where it asks for the same.
+    Reload(Option<Earlier>, Writes),
+    /// Of the program with the classes missing from its reflection table
+    /// (`super::with_flow_classes`), over a load that takes the units that javac gave this one
+    /// where it asks for the same.
+    Flow(Vec<(TableKind, String)>, Option<Earlier>),
 }
 
 /// `census_program` over these units and reach (`super::load`), with the writes of `String`
 /// arrays as `writes` says; `same`: a walk with them reaches the same as without.
 fn census_reached(
     program: &Program,
-    loaded: (Vec<Value>, Reach),
+    loaded: Loaded,
     writes: Writes,
     same: bool,
 ) -> Result<Taken, ProgramError> {
     let files = source_files(program)?;
-    let (units, mut reach) = loaded;
+    let (units, mut reach, transcript) = loaded;
     reach.string_array_writes = writes != Writes::Without;
     // Panics are rejections in a census: they are reported with the rest, not printed.
     let hook = std::panic::take_hook();
@@ -215,18 +234,22 @@ fn census_reached(
     let Narrowed { class, mut rejections, mut fatal, again, units: lowered_units, missing, .. } = narrowed;
     if !missing.is_empty() {
         std::panic::set_hook(hook);
-        return Ok(Taken::Flow(missing));
+        drop((class, trees, reach));
+        return Ok(Taken::Flow(missing, transcript.map(|t| Earlier::new(t, units))));
     }
     if let Some(next) = again {
         std::panic::set_hook(hook);
         drop((class, trees));
-        let again = same.then(|| Box::new((units, reach)));
-        if again.is_some() && crate::timings::enabled() {
+        if !same {
+            drop(reach);
+            return Ok(Taken::Reload(transcript.map(|t| Earlier::new(t, units)), next));
+        }
+        if crate::timings::enabled() {
             eprintln!(
                 "timing: javac and reach: the units and reach of the census without the writes of `String[]`s"
             );
         }
-        return Ok(Taken::Again(again, next));
+        return Ok(Taken::Again(Box::new((units, reach, transcript)), next));
     }
     // What the census needs of javac's trees is taken from them now, so that they are not held
     // while the program is analysed: the pieces of code, the files, and the units of the
@@ -238,7 +261,7 @@ fn census_reached(
     let jdk_temps = javac::jdk_temps(&trees[files.len()..]);
     let unit_files = survey::unit_files(&units.iter().collect::<Vec<_>>(), program, &files);
     drop(trees);
-    drop((units, reach));
+    drop((units, reach, transcript));
     let lowered =
         Lowered { class, units: lowered_units, files: unit_files, rejections, fatal, scan, jdk_temps };
     if lowered.class.is_some() {

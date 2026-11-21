@@ -135,6 +135,16 @@ which it is reached. They only change how the work is ordered:
   variables in scope where the table is asked for. What making a table records (covariant
   arrays, Rust generics that fail, rejected classes) its first making records, so making it
   again would add nothing. javac's five lowering attempts went from 21.1 s to 13.8 s.
+- **javac once for a census.** A census is taken again when the reflection table misses classes
+  that its lookups can get, and with the writes of `String` arrays once one of them can run
+  (`program/census.rs`); each time it loaded the program again, and javac attributed the same
+  units again: three times on javac's census. A load now takes the units that javac gave the
+  census's earlier load, round by round, for as long as its walk asks for what that load's
+  rounds asked for, and starts javac only when a round asks for something else, asking it first
+  for what the rounds before asked (`program::Earlier`). On javac's census both later loads take
+  all 18 rounds: javac runs once, and the census goes from 317 s to 231 s, 488 to 295 s of CPU
+  and 1,862 G to 1,103 G instructions (the JVM's with the translator's), with the same crate,
+  tree and report. The Minecraft server's census loads once, so it gains nothing.
 
 `whole_objects`, the analysis the old census never got past on javac, was slow for the first
 three of these reasons: the borrowing rounds over name sets, a scan of the program per class for

@@ -1015,7 +1015,8 @@ as an array of that class would (an `Object[]` passes `instanceof String[]`). Al
   reached solely through what the writes themselves pass to the JDK's methods, which
   `JAVA_TO_RUST_STRING_WRITES_CHECK=1` checks does not happen. Otherwise the program is made
   without the writes, and made again with them, reached by a walk of their own, once a rejected
-  one can run;
+  one can run (a census's walk takes the units that javac gave the first one, round by round, for
+  as long as it asks for the same classes);
 - an array of an enum that is an `Object[]` holds its constants as `Object`s, cast back where
   read (an `Option` where the element may be null).
 
