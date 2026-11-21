@@ -631,7 +631,12 @@ of its shape run only for the kinds they can hold for, in the same order as befo
 names and call keys are copied only when an item is made of them; a field of a tree node is
 found by its first byte before its whole name (`value::Map::search`). A stale walk stops as
 soon as it goes stale, as all it reached is thrown away. Reflection's lookups use an index of
-the declared methods and fields that the walk keeps as it declares them, and the check that
+the declared methods and fields that the walk keeps as it declares them. The walk searches for
+what they find each time its work runs out, about a hundred times over the Minecraft server's
+rounds, and a search looks only where the walk may have added something to find since the last
+(`reflection::ReflectCache`): the classes of each bound are checked against it once a round, and a
+lookup whose names do not depend on the strings looks only in the classes added since, which
+halved the server's reachability. The check that
 streams stay sequential indexes calls by the names in javac's symbols without copying them, and
 copies the key of a reached method, field or class only when it was not indexed yet.
 Whether the records' members changed with a round's units is told by comparing what completing
