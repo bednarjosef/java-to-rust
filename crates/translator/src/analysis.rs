@@ -461,9 +461,9 @@ impl Analysed {
     }
 }
 
-/// What the analyses find from the code alone, after the checks (`analyze_from`).
-struct FromCode<'scope> {
-    ranges: Facts,
+/// What the analyses find from the code alone, after the checks (`analyze_from`), besides the
+/// ranges.
+struct FromCode {
     fixed_fields: fixed_fields::FixedFields,
     eager_init: FastSet<usize>,
     early_init: FastSet<usize>,
@@ -472,8 +472,6 @@ struct FromCode<'scope> {
     entry_init: FastSet<usize>,
     early_static_reads: FastSet<ExprId>,
     proven_types: FastMap<ExprId, usize>,
-    /// `Facts::ascii_length`, from the ranges' `ascii_chars`, on a thread of its own.
-    ascii_length: alongside::Alongside<'scope, FastSet<ExprId>>,
 }
 
 /// `analyze_tolerating`, from the facts that `represented` found for `class` (which it finds
@@ -490,15 +488,22 @@ struct FromCode<'scope> {
 /// before. None of these steps changes the program or keeps state that another reads.
 ///
 /// So the steps that read none of each other's facts run at once, on threads of their own
-/// (`alongside`): from the start, alongside the representation and the checks, the ranges, fixed
-/// fields, statics and early reads, which read the code and the ranges alone, with the ASCII
-/// strings (`ascii_length`) on a thread of their own once the ranges are found, and the objects on
-/// the stack, which read the code alone, until the caller takes them; once the representation and the pattern variables are checked, nullness, which reads the
-/// representation's facts and the statics, and then the borrowed parameters, which read nullness
-/// alone, alongside the object values and the checks after them. Nothing after them but the
-/// generator reads the borrowed parameters and ASCII strings. Each step's result is taken where
-/// the steps ran one after another, so the analyses find what they found then, and stop at the
-/// same error or panic.
+/// (`alongside`). From the start, alongside the representation and the checks: the ranges, with
+/// the ASCII strings (`ascii_length`), which read the ranges alone, on a thread of their own once
+/// the ranges are found; the fixed fields, statics, early reads and proven classes, which read the
+/// code alone; and the objects on the stack, which read the code alone, until the caller takes
+/// them. Once the representation and the pattern variables are checked, alongside the object
+/// values and the checks after them: nullness, which reads the representation's facts and the
+/// statics; then the borrowed parameters and the lent closures, which read nullness and the
+/// closure types alone, on a thread of their own; and, after nullness, the frozen fields, arrays,
+/// indexing, moves and exceptions, which read the representation's facts, the statics, the
+/// ranges, nullness and each other's facts, and none of those found on the caller's thread (the
+/// identity checks of the object values, the boxes compared by identity, the classes whose
+/// monitors are kept) or by the borrowed parameters, the lent closures and the ASCII strings,
+/// which only the strings lent (`lent_strings`) and the generator read. Each step's result is
+/// taken where the steps ran one after another, so the analyses find what they found then, and
+/// stop at the same error or panic; a check that rejects the program ends them once the steps
+/// alongside it are done, and what those found is dropped.
 pub fn analyze_from(
     class: &Class,
     tolerated: &[Error],
@@ -564,12 +569,21 @@ fn analyze_with(
                 .then(|| phase("analysis: stack objects", || escape::stack_objects(class)))
         });
         let ranges = found.as_mut().and_then(|found| found.ranges.take());
-        let from_code = Alongside::start(scope, move || {
+        let from_ranges = Alongside::start(scope, move || {
             let ranges = ranges.unwrap_or_else(|| {
                 let mut ranges = Facts::default();
                 phase("analysis: ranges", || ranges::analyze(class, &mut ranges));
                 ranges
             });
+            let ascii_chars = ranges.ascii_chars.clone();
+            let ascii_length = Alongside::start(scope, move || {
+                let mut facts = Facts { ascii_chars, ..Facts::default() };
+                phase("analysis: ascii", || ascii_strings(class, &mut facts));
+                facts.ascii_length
+            });
+            (ranges, ascii_length)
+        });
+        let from_code = Alongside::start(scope, move || {
             // Whether the program starts threads, as the representation finds it.
             let threaded = threads::threaded(class);
             let fixed_fields =
@@ -582,16 +596,9 @@ fn analyze_with(
                     let entry = statics::entry_inits(class, &eager, &early);
                     (eager, early, finals, frozen, entry)
                 });
-            let ascii_chars = ranges.ascii_chars.clone();
-            let ascii_length = Alongside::start(scope, move || {
-                let mut facts = Facts { ascii_chars, ..Facts::default() };
-                phase("analysis: ascii", || ascii_strings(class, &mut facts));
-                facts.ascii_length
-            });
             let early_static_reads =
                 phase("analysis: early static reads", || early_reads::early_reads(class, &eager_init));
             FromCode {
-                ranges,
                 fixed_fields,
                 eager_init,
                 early_init,
@@ -600,7 +607,6 @@ fn analyze_with(
                 entry_init,
                 early_static_reads,
                 proven_types: phase("analysis: proven classes", || proven_classes::proven_types(class)),
-                ascii_length,
             }
         });
         let found = found.get_or_insert_with(|| represented(class));
@@ -613,56 +619,67 @@ fn analyze_with(
         // found from the code; the checks' own (`faithful_boxes`) are set aside until nullness
         // is done.
         let mut facts = found.facts.clone();
-        let nullness = Alongside::start(scope, move || {
-            let FromCode {
-                ranges,
-                fixed_fields,
-                eager_init,
-                early_init,
-                final_statics,
-                frozen_statics,
-                entry_init,
-                early_static_reads,
-                proven_types,
-                ascii_length,
-            } = from_code.join();
+        let after_checks = Alongside::start(scope, move || {
+            let from_code = from_code.finish();
+            // Nullness reads the statics, not the ranges, which come before them where the steps
+            // run one after another: their result, and a panic of theirs, is taken first.
+            let nullness = alongside::Done::of(|| {
+                let FromCode {
+                    fixed_fields,
+                    eager_init,
+                    early_init,
+                    final_statics,
+                    frozen_statics,
+                    entry_init,
+                    early_static_reads,
+                    proven_types,
+                } = from_code.take();
+                facts.fixed_fields = fixed_fields.fixed;
+                facts.eager_init = eager_init;
+                facts.early_init = early_init;
+                facts.final_statics = final_statics;
+                facts.frozen_statics = frozen_statics;
+                facts.entry_init = entry_init;
+                facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
+                    [main] => Some(main.class),
+                    _ => None,
+                };
+                facts.early_static_reads = early_static_reads;
+                facts.proven_types = proven_types;
+                phase("analysis: nullness", || nullness::analyze(class, &mut facts));
+                fixed_fields.if_built_alone
+            });
+            let (ranges, ascii_length) = from_ranges.join();
+            let fixed_if_built_alone = nullness.take();
             facts.no_overflow = ranges.no_overflow.clone();
             facts.safe_division = ranges.safe_division.clone();
             facts.ascii_chars = ranges.ascii_chars.clone();
             facts.index_ranges = ranges.index_ranges.clone();
-            facts.fixed_fields = fixed_fields.fixed;
-            let fixed_if_built_alone = fixed_fields.if_built_alone;
-            facts.eager_init = eager_init;
-            facts.early_init = early_init;
-            facts.final_statics = final_statics;
-            facts.frozen_statics = frozen_statics;
-            facts.entry_init = entry_init;
-            facts.main_class = match class.methods.iter().filter(|c| c.is_main).collect::<Vec<_>>()[..] {
-                [main] => Some(main.class),
-                _ => None,
-            };
-            facts.early_static_reads = early_static_reads;
-            facts.proven_types = proven_types;
-            phase("analysis: nullness", || nullness::analyze(class, &mut facts));
-            let borrowing = alongside::Done::of(|| {
+            let (nullable_vars, closure_types) = (facts.nullable_vars.clone(), facts.closure_types.clone());
+            let borrowing = Alongside::start(scope, move || {
                 phase("analysis: borrowing", || {
-                    borrowed_params(class, &mut facts);
-                    (facts.borrowed_objects, facts.borrowed_optional_objects) =
-                        borrowed_objects(class, &facts);
-                    let borrowed =
-                        facts.borrowed_objects.union(&facts.borrowed_optional_objects).copied().collect();
-                    let non_null = |m: usize, name: &str| !nullable_var(&facts, m, name);
-                    let optional = &facts.borrowed_optional_objects;
+                    let params = borrowed_params(class, &nullable_vars);
+                    let (objects, optional) = borrowed_objects(class, &nullable_vars);
+                    let borrowed = objects.union(&optional).copied().collect();
+                    let non_null = |m: usize, name: &str| !nullable_vars.contains(m, name);
                     let lent =
-                        closures::lent_closures(class, &facts.closure_types, &borrowed, optional, &non_null);
-                    facts.lent_captures =
-                        closures::lent_captures(class, &facts.closure_types, &lent, optional);
-                    facts.lent_closures = lent;
-                    facts.closure_locals =
-                        closures::closure_locals(class, &facts.closure_types, &facts.lent_closures);
+                        closures::lent_closures(class, &closure_types, &borrowed, &optional, &non_null);
+                    let captures = closures::lent_captures(class, &closure_types, &lent, &optional);
+                    let locals = closures::closure_locals(class, &closure_types, &lent);
+                    (params, (objects, optional), (lent, captures, locals))
                 })
             });
-            (facts, ranges, borrowing, ascii_length, fixed_if_built_alone)
+            // The steps after borrowing, none of which reads what it finds (the borrowed
+            // parameters and objects, and the lent closures) or the facts that the caller's thread
+            // adds before them.
+            let rest = alongside::Done::of(|| {
+                phase("analysis: frozen fields", || frozen_fields::analyze(class, &mut facts));
+                phase("analysis: arrays", || arrays::analyze(class, &mut facts));
+                phase("analysis: indexing", || indexing::analyze(class, &mut facts));
+                phase("analysis: moves", || moves::analyze(class, &mut facts));
+                phase("analysis: exceptions", || exceptions::analyze(class, &mut facts))
+            });
+            (facts, ranges, borrowing, ascii_length, rest, fixed_if_built_alone)
         });
         let (identity_checks, object_values) =
             phase("analysis: object values", || patterns::check_object_values(class, &found.facts));
@@ -679,19 +696,19 @@ fn analyze_with(
         })();
         let faithful_boxes = std::mem::take(&mut found.facts.faithful_boxes);
         checks?;
-        let (mut facts, ranges, borrowing, ascii_length, fixed_if_built_alone) = nullness.join();
+        let (mut facts, ranges, borrowing, ascii_length, rest, fixed_if_built_alone) = after_checks.join();
         found.ranges = Some(ranges);
         facts.identity_checks = identity_checks;
         facts.faithful_boxes = faithful_boxes;
         facts.class_monitors = monitors::class_monitors(class, &facts);
-        borrowing.take();
+        (
+            (facts.borrowed_params, facts.borrowed_optional_params),
+            (facts.borrowed_objects, facts.borrowed_optional_objects),
+            (facts.lent_closures, facts.lent_captures, facts.closure_locals),
+        ) = borrowing.join();
         facts.ascii_length = ascii_length.join();
         lent_strings(class, &mut facts);
-        phase("analysis: frozen fields", || frozen_fields::analyze(class, &mut facts));
-        phase("analysis: arrays", || arrays::analyze(class, &mut facts));
-        phase("analysis: indexing", || indexing::analyze(class, &mut facts));
-        phase("analysis: moves", || moves::analyze(class, &mut facts));
-        phase("analysis: exceptions", || exceptions::analyze(class, &mut facts)).or_else(failed)?;
+        rest.take().or_else(failed)?;
         // An uncaught-exception handler gets the failures of the runtime as objects of their classes.
         if threads::handles_uncaught(class) {
             for new in &class.raised {
@@ -947,25 +964,27 @@ pub fn reads_leading_fields(decl: &TypeDecl, leading: &[(usize, &Expr)]) -> bool
     })
 }
 
-fn borrowed_params(class: &Class, facts: &mut Facts) {
+fn borrowed_params(class: &Class, nullable_vars: &MethodLocals) -> (Params, Params) {
+    let (mut plain, mut optional) = (Params::default(), Params::default());
     // A shared string keeps its identity only as a `java::JStr`, which is passed as it is.
     if class.shared_strings {
-        return;
+        return (plain, optional);
     }
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
             if p.ty != Type::String || assigns_any(&method.body, &p.name) {
                 continue;
             }
-            if nullable_var(facts, m, &p.name) {
-                facts.borrowed_optional_params.insert((m, i));
+            if nullable_vars.contains(m, &p.name) {
+                optional.insert((m, i));
             } else {
-                facts.borrowed_params.insert((m, i));
+                plain.insert((m, i));
             }
         }
     }
-    align_groups(class, &mut facts.borrowed_params);
-    align_groups(class, &mut facts.borrowed_optional_params);
+    align_groups(class, &mut plain);
+    align_groups(class, &mut optional);
+    (plain, optional)
 }
 
 /// `Facts::lent_strings`, once `borrowed_params` and `ascii_length` are known.
@@ -1042,7 +1061,7 @@ type Params = FastSet<(usize, usize)>;
 
 /// The object parameters that methods borrow: those that can never be null (`&Rc<..>`) and
 /// those that can (`&Option<Rc<..>>`).
-fn borrowed_objects(class: &Class, facts: &Facts) -> (Params, Params) {
+fn borrowed_objects(class: &Class, nullable_vars: &MethodLocals) -> (Params, Params) {
     let mut borrowed = Params::default();
     for (m, method) in class.methods.iter().enumerate() {
         for (i, p) in method.params.iter().enumerate() {
@@ -1069,7 +1088,7 @@ fn borrowed_objects(class: &Class, facts: &Facts) -> (Params, Params) {
         }
     }
     let (mut nullable, mut plain): (Params, Params) =
-        borrowed.into_iter().partition(|&(m, i)| nullable_var(facts, m, &class.methods[m].params[i].name));
+        borrowed.into_iter().partition(|&(m, i)| nullable_vars.contains(m, &class.methods[m].params[i].name));
     // The methods of a group take a parameter alike, so it is null in all of them or in none.
     align_groups(class, &mut plain);
     align_groups(class, &mut nullable);
