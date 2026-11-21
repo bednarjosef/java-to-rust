@@ -118,12 +118,12 @@ impl<T: std::fmt::Display + crate::Piece> crate::Piece for OrNull<T> {
     }
 }
 
-/// `a == b` on references that may be null: both null, or the same object.
+/// `a == b` on references that may be null: both null, or the same object. A handle's address is
+/// never null, so null's is: one compare of two words, with no branch on either being null.
+#[inline]
 pub fn same<H: Handle>(a: Option<&H>, b: Option<&H>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => a.address() == b.address(),
-        (a, b) => a.is_none() && b.is_none(),
-    }
+    let address = |h: Option<&H>| h.map_or(std::ptr::null(), Handle::address);
+    std::ptr::eq(address(a), address(b))
 }
 
 /// `a == b` on two `Object`s that may both be strings or boxes (see `SameObject`), either of
@@ -167,5 +167,27 @@ impl<T: ?Sized> Handle for std::rc::Rc<T> {
 impl<T> Handle for crate::Arc<T> {
     fn address(&self) -> *const u8 {
         crate::Arc::as_ptr(self) as *const u8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same;
+    use std::rc::Rc;
+
+    #[test]
+    fn same_is_identity_with_null_equal_only_to_null() {
+        let (a, b) = (Rc::new(1), Rc::new(1));
+        let a2 = a.clone();
+        let none: Option<&Rc<i32>> = None;
+        assert!(same(none, none));
+        assert!(!same(Some(&a), none));
+        assert!(!same(none, Some(&b)));
+        assert!(same(Some(&a), Some(&a2)));
+        assert!(!same(Some(&a), Some(&b)));
+        let (x, y) = (Rc::new(()), Rc::new(()));
+        assert!(same(Some(&x), Some(&x.clone())));
+        assert!(!same(Some(&x), None));
+        assert!(!same(Some(&x), Some(&y)));
     }
 }
