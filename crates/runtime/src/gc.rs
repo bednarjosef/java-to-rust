@@ -25,8 +25,9 @@
 //!
 //! **Collection** runs when the program has taken as many bytes as were alive after the last one
 //! (at least `MIN_COLLECT`; `JAVA_GC_GROWTH` sets the share), times a scale that grows, up to
-//! twice, while each collection takes more than half as much processor time as the program used
-//! since the last (`TIME_SHARE`; `JAVA_GC_TIME` sets the share, 0 turns the scale off). It stops every other thread
+//! twice or, for a small heap, to `SMALL_ROOM` bytes, while each collection takes more than half
+//! as much processor time as the program used since the last (`TIME_SHARE`; `JAVA_GC_TIME` sets
+//! the share, 0 turns the scale off). It stops every other thread
 //! (with `SIGPWR`; each records where its stack is and waits), marks every slot reachable from the
 //! roots, and frees the taken slots left unmarked. With a large heap, helper threads
 //! mark and sweep alongside (see "Marking"). The roots are scanned conservatively: any aligned word that points into a
@@ -135,7 +136,8 @@ const MIN_COLLECT: usize = 64 << 20;
 
 /// While a collection takes more processor time than this percentage of what the program used
 /// since the last one, the bytes taken between collections grow (`scale_by_time`), by at most `SCALE_STEP` a collection and to
-/// `MAX_SCALE` percent at most; while they take less, the growth shrinks back, by half at most.
+/// `MAX_SCALE` percent at most, or to `SMALL_ROOM` bytes where that is more; while they take
+/// less, the growth shrinks back, by half at most.
 /// Processor time rather than time on the clock, so that threads taking memory side by side do
 /// not count as collecting more. The small step keeps a short phase of costly collections from
 /// growing the heap: the share must stay high for several collections in a row. BinaryTrees and
@@ -158,8 +160,8 @@ const MAX_SCALE: usize = 200;
 /// The bytes taken between collections that the scale may reach past `MAX_SCALE`, for a program
 /// that collects often and has little alive: BinaryTrees marks a tree of up to 85 MB on every
 /// collection; with up to twice as much taken between them it collects 38 times at a peak of
-/// 245 MB, with up to 256 MB 26 times at 340 MB, in 15% fewer instructions (the Java VM's peak is
-/// 1.8 GB).
+/// 245 MB, with up to 256 MB 25 times at 331 MB, in a fifth fewer instructions (17.7 G against
+/// 22.1 G; the Java VM's peak is 2 GB).
 const SMALL_ROOM: usize = 256 << 20;
 
 /// How many slots of one class a thread's list keeps before freed ones go back to their blocks.
@@ -362,7 +364,7 @@ struct Heap {
     /// (`JAVA_GC_GROWTH`).
     growth: usize,
     /// How much more than that the program takes between collections, in percent, from 100 to
-    /// `MAX_SCALE` (`scale_by_time`).
+    /// `MAX_SCALE`, or to what takes `SMALL_ROOM` bytes where that is more (`scale_by_time`).
     scale: usize,
     /// A collection's processor time, in percent of the program's since the last one, above
     /// which `scale` grows: `TIME_SHARE`, or what `JAVA_GC_TIME` sets (0 keeps `scale` at 100).
