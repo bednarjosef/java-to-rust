@@ -12,9 +12,10 @@
 //! A receiver qualifies when it is
 //!
 //! - a read of a local variable that only ever holds such objects: every declaration and
-//!   assignment of the variable (`Resolution`) gives it a `new` of the objects (of one class), or
-//!   the value of another such variable, and it is not a parameter, a loop's or a catch's
-//!   variable, nor a pattern variable;
+//!   assignment of the variable (`Resolution`) gives it a `new` of the objects (of one class) or a
+//!   call of a factory that makes one in the caller's slot (`StackObjects::calls`), or the value
+//!   of another such variable, and it is not a parameter, a loop's or a catch's variable, nor a
+//!   pattern variable;
 //! - in a method of a lambda's class, `this.f`, a field that captured such a local: every `new`
 //!   of the lambda's class passes one as the value of `f`, and nothing else writes `f`. The lambda
 //!   holds the object, so it does not leave the method either (`Contents`): its methods run on
@@ -23,10 +24,15 @@
 //!   lowering binds a call's receiver to (`receiver$0`, `lower::ordered_call`) does.
 //!
 //! The methods that those calls may run, and in turn those that they call on `this`, whose
-//! object is the same one, are `StackObjects::confined_methods` when they do something atomic to
-//! `this`: an update of a field through `Unsafe` (`compareAndSet`), an access of a `volatile`
-//! field, or a call of such a method on `this`. The other methods' accesses are acquire loads and
-//! release stores, plain moves already, and a second form of them would only cost code.
+//! object is the same one, are `StackObjects::confined_methods` when they access a field of
+//! `this` that Java may assign after the constructor (not `final`), update one through `Unsafe`
+//! (`compareAndSet`), or call such a method on `this`. A final field alone gives none: it is
+//! mostly fixed and read plainly anyway (`Gen::fixed_cell`), and the rare one that is not is left
+//! as it is. The acquire loads and release stores of the other fields are plain moves
+//! on x86, but LLVM forwards no store to a later load of an atomic cell, merges no two loads of
+//! one and keeps none in a register: `pos.move(1, 0, 0)` in a loop, on a position that the loop
+//! also reads, loads the three coordinates and stores them back on each turn, where its confined
+//! form adds one in place (the benchmark `MutablePositions`: a fifth fewer instructions).
 
 use super::{FastMap, FastSet, MERGED, Resolution, StackObjects, VarKey};
 use crate::ast::*;
@@ -34,9 +40,16 @@ use crate::ast::*;
 /// `StackObjects::confined` and `StackObjects::confined_methods`, from what the analysis found.
 pub(super) fn receivers(class: &Class, found: &StackObjects) -> (FastSet<ExprId>, FastSet<usize>) {
     let moved: FastSet<ExprId> = found.moves.values().flatten().map(|mv| mv.made).collect();
-    let made = |e: &Expr| match e.kind {
-        ExprKind::New { class: c, .. } if found.objects.contains(&e.id) && !moved.contains(&e.id) => Some(c),
-        _ => None,
+    // A `new` of an object that stays in the method, or the call of a factory that makes one in
+    // the method's slot, with the object's class.
+    let made = |e: &Expr| {
+        if !found.objects.contains(&e.id) || moved.contains(&e.id) {
+            return None;
+        }
+        match e.kind {
+            ExprKind::New { class: c, .. } => Some(c),
+            _ => found.calls.get(&e.id).and_then(|f| found.factories.get(f)).map(|product| product.class),
+        }
     };
     let mut receivers: FastMap<ExprId, usize> = FastMap::default();
     // The fields of lambdas' classes that capture such locals, with the objects' classes, and the
@@ -170,16 +183,16 @@ pub(super) fn receivers(class: &Class, found: &StackObjects) -> (FastSet<ExprId>
             reach(r, c, &mut work);
         }
     }
-    // Of those, the methods that do something atomic to `this`: an update of a field (a
-    // `compareAndSet` through `Unsafe`, `Method::field_update`) or an access of a `volatile`
-    // field, or that call such a method on `this`. Only those gain from a plain form.
+    // Of those, the methods that access a field of `this` whose accesses are atomic: an update of
+    // a field (a `compareAndSet` through `Unsafe`, `Method::field_update`) or an access of a field
+    // that is not final, or that call such a method on `this`. Only those gain from a plain form.
     let mut methods: FastSet<usize> = reached
         .iter()
         .map(|&(k, _)| k)
         .filter(|&k| {
             let m = &class.methods[k];
             m.field_update.is_some()
-                || m.body.iter().any(|s| any_in(s, &mut |x| volatile_on_this(class, m.class, x)))
+                || m.body.iter().any(|s| any_in(s, &mut |x| assigned_field_on_this(class, m.class, x)))
         })
         .collect();
     loop {
@@ -196,8 +209,9 @@ pub(super) fn receivers(class: &Class, found: &StackObjects) -> (FastSet<ExprId>
     (receivers.into_keys().collect(), methods)
 }
 
-/// Whether `x` reads or writes a `volatile` field of `this`, in a method of class `t`.
-fn volatile_on_this(class: &Class, t: usize, x: &Expr) -> bool {
+/// Whether `x` reads or writes a field of `this` that is not final (a `volatile` field among
+/// them), in a method of class `t`.
+fn assigned_field_on_this(class: &Class, t: usize, x: &Expr) -> bool {
     let (ExprKind::Field { object, name }
     | ExprKind::Assign { target: Place::Field { object, name }, .. }
     | ExprKind::IncDec { target: Place::Field { object, name }, .. }) = &x.kind
@@ -205,7 +219,10 @@ fn volatile_on_this(class: &Class, t: usize, x: &Expr) -> bool {
         return false;
     };
     matches!(object.kind, ExprKind::This)
-        && super::field_of(class, t, name).is_some_and(|(c, i)| class.types[c].fields[i].volatile)
+        && super::field_of(class, t, name).is_some_and(|(c, i)| {
+            let field = &class.types[c].fields[i];
+            !field.is_final || field.volatile
+        })
 }
 
 /// What an assignment gives a variable: objects of one class (`None` for anything else), or

@@ -171,7 +171,7 @@ pub struct StackObjects {
     /// or in a lambda's method the field that captured one.
     pub confined: FastSet<ExprId>,
     /// The methods that the calls on `confined` receivers may run, and those that these call on
-    /// `this`, that do something atomic to `this` (see `confined`).
+    /// `this`, that access a field of `this` atomically (see `confined`).
     pub confined_methods: FastSet<usize>,
     /// The classes with instance fields whose objects, and those of every subclass, are built
     /// alone (see **Objects being built**).
