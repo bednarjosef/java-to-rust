@@ -222,8 +222,27 @@ fn leaves(class: &Class, leaking: &FastSet<usize>, e: &Expr) -> bool {
     left
 }
 
+/// The methods that call `x` may run (`Class::callees`), with an instance call's narrowed to the
+/// implementations of the classes that the points-to facts give its receiver
+/// (`Class::receivers`), where they give any: an interface's call made where only a few of its
+/// classes' objects arrive (the server's `BlockStateBase` asks its block's properties for its
+/// light through a `ToIntFunction`) runs only theirs.
+fn run_by(class: &Class, x: &Expr) -> Vec<usize> {
+    if let ExprKind::MethodCall { receiver, resolved: Some(m), is_super: false, .. } = &x.kind
+        && !class.methods[*m].is_static
+        && let Some(set) = class.receivers.get(&receiver.id)
+    {
+        let mut run: Vec<usize> = set.iter().filter_map(|&c| class.hierarchy.implementation(*m, c)).collect();
+        run.sort_unstable();
+        run.dedup();
+        return run;
+    }
+    class.callees(x)
+}
+
 /// The classes that a constructor which may start a thread builds objects of: the class of the
-/// constructor, and its superclasses, whose fields the object has too.
+/// constructor, and its superclasses, whose fields the object has too. A call runs the methods
+/// that `run_by` gives it.
 fn constructors_starting_threads(class: &Class) -> FastSet<usize> {
     // Who calls each method, then every method from which a call chain reaches `Thread.start`.
     let mut callers: Vec<Vec<usize>> = vec![Vec::new(); class.methods.len()];
@@ -241,7 +260,7 @@ fn constructors_starting_threads(class: &Class) -> FastSet<usize> {
                             starting[m] = true;
                             work.push(m);
                         }
-                        for callee in class.callees(x) {
+                        for callee in run_by(class, x) {
                             callers[callee].push(m);
                         }
                     })
@@ -271,7 +290,7 @@ fn constructors_starting_threads(class: &Class) -> FastSet<usize> {
         for init in decl.fields.iter().filter_map(|f| f.init.as_ref()) {
             visit_expr(init, &mut |x| {
                 if matches!(x.kind, ExprKind::Builtin(Builtin::Native(Native::ThreadStart), _))
-                    || class.callees(x).iter().any(|&m| starting[m])
+                    || run_by(class, x).iter().any(|&m| starting[m])
                 {
                     builders.insert(t);
                 }

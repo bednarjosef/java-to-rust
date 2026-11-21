@@ -734,8 +734,9 @@ to run.
   rather than `c.borrow().base.name`: the field itself, borrowed as long as the handle, with no
   `RefCell` borrow or lock taken and none to end, so it needs no copy where a borrow of the
   object could not last (`{ c.borrow().name.clone() }`). In a program with threads, the fields of
-  a class whose constructors, or whose subclasses' constructors, may start a thread are not
-  fixed, since that thread could read one while the constructor writes it, but for those that
+  a class whose constructors, or whose subclasses' constructors, may start a thread (through a
+  call that runs, for a receiver the points-to facts follow, the methods of the classes they give
+  it) are not fixed, since that thread could read one while the constructor writes it, but for those that
   only the class's own constructors and field initializers write, each write before `this` can
   have left (`written_late`). A constructor runs the statements before its `super(..)` first
   (javac's enclosing instance and captured locals), then the superclasses' constructors, its
