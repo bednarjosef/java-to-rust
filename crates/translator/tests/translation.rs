@@ -1031,6 +1031,45 @@ fn a_superclass_constructor_that_calls_an_override_runs_on_the_whole_object() {
 }
 
 #[test]
+fn the_final_fields_of_a_class_built_whole_are_fixed() {
+    // `State`'s constructor hands `this` to a lambda, so `Holder` and `Base` are built whole:
+    // their constructors become `construct_holder` and `construct_base`, which write `keys` and
+    // `values` as the constructors did. Nothing else writes them, so they are fixed.
+    let rust = translate(
+        "import java.util.function.ToIntFunction;
+        abstract class Holder {
+            final String[] keys;
+            final int[] values;
+            Holder(String[] keys, int[] values) { this.keys = keys; this.values = values; }
+            int find(String k) {
+                for (int i = 0; i < keys.length; i++) {
+                    if (keys[i].equals(k)) return values[i];
+                }
+                return -1;
+            }
+        }
+        class Base extends Holder {
+            final int emission;
+            Base(ToIntFunction<Base> light, String[] keys, int[] values) {
+                super(keys, values);
+                this.emission = light.applyAsInt(this);
+            }
+        }
+        final class State extends Base {
+            State(ToIntFunction<Base> light) { super(light, new String[] { \"a\" }, new int[] { 3 }); }
+        }
+        class A {
+            public static void main(String[] a) {
+                State s = new State(b -> b.find(\"a\") + 1);
+                System.out.println(s.emission + \" \" + s.find(\"a\"));
+            }
+        }",
+    );
+    assert_contains(&rust, &["fn construct_holder(", ".keys.fixed()", ".values.fixed()"]);
+    assert_lacks(&rust, &[".keys.get()", ".values.get()"]);
+}
+
+#[test]
 fn superclass_static_initialization_runs_first() {
     let rust = translate(
         "abstract class Base {
