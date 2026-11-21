@@ -127,6 +127,19 @@ pub(super) fn struct_name(name: &str) -> String {
     }
 }
 
+/// `struct_name` without the path, which names no class for the item being written
+/// (`modules::name_in_package`): for the names of functions made from a class's name.
+pub(super) fn local_struct_name(name: &str) -> String {
+    if let Some((_, var)) = name.rsplit_once('#') {
+        return var.to_string();
+    }
+    let local = modules::flat_name(name, modules::name_in_package(name));
+    match STD_NAMES.contains(&local.as_str()) {
+        true => format!("{local}_"),
+        false => local,
+    }
+}
+
 /// The names of Rust's own types and values that the generated code writes without a path.
 const STD_NAMES: [&str; 13] =
     ["Option", "Some", "None", "Result", "Ok", "Err", "String", "Vec", "Box", "Rc", "RefCell", "Cell", "Ref"];

@@ -632,8 +632,64 @@ impl<'a> Gen<'a> {
     }
 
     /// The runs of class numbers of each of `groups` that `tag_patterns` writes, as
-    /// `(first, last)`.
+    /// `(first, last)`. A long `among` is the variants of an enum, which hundreds of matches are
+    /// over (each conversion of `Object`'s enum, of 20 000 classes, is one), so its numbers are
+    /// put in order once (`tag_runs_in_order`) rather than sorted again for each.
     pub(super) fn tag_runs(&self, groups: &[&[usize]], among: &[usize]) -> Vec<Vec<(u16, u16)>> {
+        if among.len() >= 64
+            && let Some(runs) = self.tag_runs_in_order(groups, among)
+        {
+            debug_assert!(runs == self.tag_runs_sorted(groups, among), "the runs in order differ");
+            return runs;
+        }
+        self.tag_runs_sorted(groups, among)
+    }
+
+    /// `tag_runs` from the numbers of `among` in order, made once for each list (`tag_orders`):
+    /// a class's number goes on the run of its group if the number before it among `among`'s is
+    /// of the same group. Every class has a number of its own (`class_numbers`), so a class is
+    /// one of `among` if its number is. `None` where a class of a group is not one of `among` or
+    /// is of two groups, or `among` holds a class twice, which `tag_runs_sorted` handles.
+    fn tag_runs_in_order(&self, groups: &[&[usize]], among: &[usize]) -> Option<Vec<Vec<(u16, u16)>>> {
+        let order = {
+            let mut orders = self.tag_orders.borrow_mut();
+            if let Some(order) = orders.get(among) {
+                order.clone()
+            } else {
+                let mut tags: Vec<u16> = among.iter().map(|&c| self.class_tag(c)).collect();
+                tags.sort_unstable();
+                let order = tags.windows(2).all(|w| w[0] < w[1]).then(|| std::rc::Rc::<[u16]>::from(tags));
+                orders.insert(among.into(), order.clone());
+                order
+            }
+        }?;
+        // Each class of the groups as (where its number is in `order`, group).
+        let mut at: Vec<(u32, u32)> = Vec::with_capacity(groups.iter().map(|classes| classes.len()).sum());
+        for (g, classes) in groups.iter().enumerate() {
+            for &c in classes.iter() {
+                at.push((order.binary_search(&self.class_tag(c)).ok()? as u32, g as u32));
+            }
+        }
+        at.sort_unstable();
+        at.dedup();
+        if at.windows(2).any(|w| w[0].0 == w[1].0) {
+            return None;
+        }
+        let mut runs: Vec<Vec<(u16, u16)>> = vec![Vec::new(); groups.len()];
+        let mut last = None;
+        for &(p, g) in &at {
+            let tag = order[p as usize];
+            match runs[g as usize].last_mut() {
+                Some(run) if p > 0 && last == Some((p - 1, g)) => run.1 = tag,
+                _ => runs[g as usize].push((tag, tag)),
+            }
+            last = Some((p, g));
+        }
+        Some(runs)
+    }
+
+    /// `tag_runs` by sorting the numbers of `among` and of the groups together.
+    fn tag_runs_sorted(&self, groups: &[&[usize]], among: &[usize]) -> Vec<Vec<(u16, u16)>> {
         let mut group_of: crate::analysis::FastMap<usize, usize> = Default::default();
         for (g, classes) in groups.iter().enumerate() {
             group_of.extend(classes.iter().map(|&c| (c, g)));
@@ -2392,16 +2448,42 @@ impl<'a> Gen<'a> {
     /// The name of the copy of body `i` for class `c` (`body_for`): the body's, then `on_` and
     /// the class's name, with its number where another class of the enum has the same name.
     pub(super) fn body_for_name(&self, i: usize, c: usize) -> String {
-        let short = |c: usize| {
-            let name = struct_name(&self.class.types[c].name);
-            snake_case(name.rsplit("::").next().unwrap_or_default())
-        };
         let Home::Enum(d) = self.homes[i] else { unreachable!("a copied body is on an enum") };
-        let mut name = format!("{}__on_{}", self.fn_names[i], short(c));
-        if self.enum_variants(d).into_iter().any(|v| v != c && short(v) == short(c)) {
+        let short = self.short_name(c);
+        let variants = self.shared_enum_variants(d);
+        let shorts = self.short_names.borrow().get(&d).cloned();
+        let shorts = shorts.unwrap_or_else(|| {
+            let mut shorts = super::ShortNames::new();
+            for &v in variants.iter() {
+                match shorts.entry(self.short_name(v)) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert((v, None));
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let (first, next) = e.get_mut();
+                        if *first != v && next.is_none() {
+                            *next = Some(v);
+                        }
+                    }
+                }
+            }
+            let shorts = std::rc::Rc::new(shorts);
+            self.short_names.borrow_mut().insert(d, shorts.clone());
+            shorts
+        });
+        // Another variant has the name if the first to have it is another, or a second does.
+        let shared = shorts.get(&short).is_some_and(|&(first, next)| first != c || next.is_some());
+        let mut name = format!("{}__on_{short}", self.fn_names[i]);
+        if shared {
             name = format!("{name}_{}", self.class_tag(c));
         }
         name
+    }
+
+    /// The name of class `c` in a function's name: its struct's without the path, in snake case.
+    /// It names no class for the item being written (`objects::local_struct_name`).
+    fn short_name(&self, c: usize) -> String {
+        snake_case(&super::objects::local_struct_name(&self.class.types[c].name))
     }
 
     /// The implementations that the variants of the enum of `t` run for a call of `resolved`.

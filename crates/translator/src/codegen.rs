@@ -749,6 +749,8 @@ impl<'a> Gen<'a> {
             cast_classes: Default::default(),
             enum_variant_sets: Default::default(),
             receivers_listed: Default::default(),
+            tag_orders: Default::default(),
+            short_names: Default::default(),
             variant_types: Default::default(),
             checked_value_ofs: &setup.checked_value_ofs,
             group_names: &setup.group_names,
@@ -938,6 +940,13 @@ enum Part {
     Text(Code),
 }
 
+/// The class numbers of lists of classes in order, by list (`Gen::tag_orders`).
+type TagOrders = crate::analysis::FastMap<Box<[usize]>, Option<std::rc::Rc<[u16]>>>;
+
+/// The short names of the variants of an enum (`dispatch::body_for_name`), each with the first
+/// class that has it and the next other one, if any.
+type ShortNames = HashMap<String, (usize, Option<usize>)>;
+
 struct Gen<'a> {
     class: &'a Class,
     facts: &'a Facts,
@@ -977,6 +986,12 @@ struct Gen<'a> {
     /// Whether the points-to facts list every class of the enum of a type that reaches a call of
     /// an override group, by `(type, group)` (`Gen::receivers_listed`).
     receivers_listed: std::cell::RefCell<HashMap<(usize, usize), bool>>,
+    /// The class numbers of each list of classes that a long `match` on tags is over, in order,
+    /// once made (`dispatch::tag_runs`); `None` where the list holds a class twice.
+    tag_orders: std::cell::RefCell<TagOrders>,
+    /// The short names of the variants of the enum of each type (`dispatch::body_for_name`), each
+    /// with the first two classes that have it, once made.
+    short_names: std::cell::RefCell<HashMap<usize, std::rc::Rc<ShortNames>>>,
     /// The types whose `enum_variants` the code written asked for, which depend on which classes
     /// are live: a census that stubs code writes the modules that asked again where a stub
     /// changes that (`generate_all_stubbing`).
