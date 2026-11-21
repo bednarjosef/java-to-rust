@@ -1388,6 +1388,47 @@ fn an_object_that_leaves_on_some_paths_moves_to_the_heap_there() {
 }
 
 #[test]
+fn an_object_only_read_until_it_leaves_names_no_object_until_then() {
+    let rust = translate(
+        "class P { final int x; P(int x) { this.x = x; } int x() { return x; } }
+        class A {
+            static P[] kept = new P[40];
+            static int n;
+            static void keep(P p) { kept[n++] = p; }
+            public static void main(String[] a) {
+                int sum = 0;
+                for (int i = 0; i < 20; i++) {
+                    P p = new P(i);
+                    sum += p.x() + p.x;
+                    if (i % 4 == 0) keep(p);
+                    if (i % 6 == 0) keep(p);
+                }
+                for (int i = 0; i < 20; i++) {
+                    P q = new P(i);
+                    if (i % 4 == 0) keep(q);
+                    sum += q.x;
+                }
+                System.out.println(sum + kept[0].x + n);
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // Read from its slot, and named only where it leaves: its handle holds no address
+            // until a move makes it name the copy in the heap.
+            "let mut p = slot_1.put(P__new(i));",
+            "p = unsafe { slot_1.unnamed(p) };",
+            "unsafe { slot_1.to_heap_unnamed(&mut p) };\n            keep(p.clone());",
+            // `q` is read after a place where it may have left, through its handle, which
+            // stays the slot's.
+            "unsafe { slot_2.to_heap(&mut q) };",
+        ],
+    );
+    assert_lacks(&rust, &["slot_2.unnamed", "slot_1.to_heap(&mut p)"]);
+}
+
+#[test]
 fn an_object_copied_into_a_call_s_argument_is_still_moved_where_it_leaves() {
     let rust = translate(
         "class P { int x; P(int x) { this.x = x; } P next() { return new P(x + 1); } }

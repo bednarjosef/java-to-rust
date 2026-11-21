@@ -211,6 +211,59 @@ impl<T> Slot<T> {
         }
     }
 
+    /// The handle `handle` of the object in the slot, made to name no object: its address is
+    /// `UNNAMED`. Until `to_heap_unnamed` makes it name a copy of the object in the heap, the
+    /// handle is not used, and the translation reads the object where it is (`object`). The
+    /// slot's address is then in no handle, so the compiler, which cannot follow an address
+    /// through a handle's number or into code out of line, sees every read and write of the
+    /// slot: it keeps the object's fields in registers, and writes the object only where it is
+    /// copied to the heap (docs/collector.md, "Objects on the stack").
+    ///
+    /// # Safety
+    ///
+    /// `H` is a handle that is the object's address alone, a `java::Arc` of the slot's type or
+    /// an `Option` of one, that `put` gave for the object in the slot, and the handle that comes
+    /// back is not read through, compared or hashed before `to_heap_unnamed` was called on it.
+    #[inline(always)]
+    pub unsafe fn unnamed<H>(&self, handle: H) -> H {
+        const { assert!(std::mem::size_of::<H>() == std::mem::size_of::<usize>()) };
+        std::mem::forget(handle);
+        unsafe { std::mem::transmute_copy::<usize, H>(&UNNAMED) }
+    }
+
+    /// `unnamed` for a handle with its class number in its top bits, which it keeps.
+    ///
+    /// # Safety
+    ///
+    /// As `unnamed`, for a struct around a `java::Thin`, or an `Option` of one.
+    #[inline(always)]
+    pub unsafe fn unnamed_of_class<H>(&self, handle: H) -> H {
+        const { assert!(std::mem::size_of::<H>() == std::mem::size_of::<usize>()) };
+        let word = unsafe { std::mem::transmute_copy::<H, usize>(&handle) };
+        std::mem::forget(handle);
+        unsafe { std::mem::transmute_copy::<usize, H>(&((word & !ADDRESS) | UNNAMED)) }
+    }
+
+    /// Makes `handle`, when it names no object yet (`unnamed`, `unnamed_of_class`), name a copy
+    /// in the collected heap of the object in the slot, keeping the class number in its top
+    /// bits; does nothing once it names the copy. The object is read here, where the compiler
+    /// sees the slot, and its value alone goes to the code out of line that allocates the copy
+    /// (`move_value`), which is never given the slot's address.
+    ///
+    /// # Safety
+    ///
+    /// As `to_heap`, for a handle that `unnamed` or `unnamed_of_class` of this slot gave, with
+    /// its object in the slot.
+    #[inline(always)]
+    pub unsafe fn to_heap_unnamed<H>(&self, handle: &mut H) {
+        const { assert!(std::mem::size_of::<H>() == std::mem::size_of::<usize>()) };
+        let word = unsafe { std::ptr::read(handle as *const H as *const usize) };
+        if word & ADDRESS == UNNAMED {
+            let moved = move_value(unsafe { std::ptr::read((*self.value.get()).as_ptr()) }, word);
+            unsafe { std::ptr::write(handle as *mut H as *mut usize, moved) };
+        }
+    }
+
     /// The word of the handle `word` of the slot's object once the object is moved to the heap:
     /// the moved object's address, with `word`'s class number.
     #[cold]
@@ -219,6 +272,18 @@ impl<T> Slot<T> {
         let moved = Arc::new(unsafe { std::ptr::read((*self.value.get()).as_ptr()) });
         (word & !ADDRESS) | Arc::as_ptr(&moved) as usize
     }
+}
+
+/// The address in a handle that names no object yet (`Slot::unnamed`): of no object, as it is
+/// below the heap and every stack, and not 0, which is `None`.
+const UNNAMED: usize = 16;
+
+/// The word of the handle `word` once it names a copy of `value` in the heap: the copy's
+/// address, with `word`'s class number (`Slot::to_heap_unnamed`).
+#[cold]
+#[inline(never)]
+fn move_value<T>(value: T, word: usize) -> usize {
+    (word & !ADDRESS) | Arc::as_ptr(&Arc::new(value)) as usize
 }
 
 impl<T> Default for Slot<T> {
@@ -301,6 +366,32 @@ mod tests {
         let tagged: Arc<std::cell::Cell<i32>> = unsafe { tagged.to_pointer() };
         assert!(!std::ptr::addr_eq(Arc::as_ptr(&tagged), Arc::as_ptr(&on_stack)));
         assert_eq!(tagged.get(), 6);
+    }
+
+    #[test]
+    fn unnamed_handles_name_a_copy_in_the_heap_once() {
+        let slot = Slot::new();
+        let put = slot.put(std::cell::Cell::new(3));
+        let mut a = unsafe { slot.unnamed(put.clone()) };
+        unsafe { slot.object() }.set(4);
+        unsafe { slot.to_heap_unnamed(&mut a) };
+        assert!(!Arc::ptr_eq(&a, &put));
+        assert_eq!(a.get(), 4);
+        let moved = a.clone();
+        unsafe { slot.to_heap_unnamed(&mut a) };
+        assert!(Arc::ptr_eq(&a, &moved));
+        // A handle with its class number in the top bits keeps it.
+        #[repr(transparent)]
+        struct Typed(crate::Thin);
+        let mut tagged = unsafe {
+            slot.unnamed_of_class(Typed(crate::Thin::pointer(7, slot.put(std::cell::Cell::new(6)))))
+        };
+        assert_eq!(tagged.0.tag(), 7);
+        unsafe { slot.to_heap_unnamed(&mut tagged) };
+        assert_eq!(tagged.0.tag(), 7);
+        let object: Arc<std::cell::Cell<i32>> = unsafe { tagged.0.to_pointer() };
+        assert!(!Arc::ptr_eq(&object, &put));
+        assert_eq!(object.get(), 6);
     }
 
     #[test]

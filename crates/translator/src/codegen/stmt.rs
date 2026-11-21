@@ -23,6 +23,7 @@ impl<'a> Gen<'a> {
         let outer_steady = self.steady.take();
         let known = self.known_init.len();
         let mut slot_reads = Vec::new();
+        let mut unnamed: Vec<&'a str> = Vec::new();
         for (i, stmt) in stmts[..end].iter().enumerate() {
             let rest = &stmts[i + 1..];
             // The block of a `synchronized` that `synchronized_block` wrote with its lock.
@@ -61,7 +62,9 @@ impl<'a> Gen<'a> {
                     let site = self.declared_site(stmt);
                     self.stmt(stmt, rest);
                     if let Some(site) = site {
-                        slot_reads.extend(self.bind_slot_fields(stmt, site, rest));
+                        let reads = self.bind_slot_fields(stmt, site, rest);
+                        unnamed.extend(self.unname_slot_object(stmt, site, rest, &reads));
+                        slot_reads.extend(reads);
                     }
                     // The statements after it run only once it completes normally.
                     let method = self.method;
@@ -75,6 +78,10 @@ impl<'a> Gen<'a> {
         // more: the same code may be written again, in another function, with no such locals.
         for id in slot_reads {
             self.loop_fields.remove(&id);
+        }
+        // The locals of this block that name no object until a move are out of scope.
+        for name in unnamed {
+            self.unnamed_locals.remove(name);
         }
         if folded {
             self.steady = Some(strings::SteadyOf::new(&stmts[end], Some(&stmts[end + 1])));
@@ -103,7 +110,7 @@ impl<'a> Gen<'a> {
     }
 
     pub(super) fn statement(&mut self, stmt: &'a Stmt, rest: &'a [Stmt]) {
-        self.move_to_heap(stmt);
+        let named = self.move_to_heap(stmt);
         match stmt {
             Stmt::Local { ty, name, init: None, pos } => {
                 let mutable = self.moved_local(*pos) || self.declared_local_is_mut(*ty, name, rest);
@@ -149,6 +156,7 @@ impl<'a> Gen<'a> {
                 self.line("}");
             }
         }
+        self.named.truncate(named);
     }
 
     fn while_loop(&mut self, cond: &'a Expr, body: &'a Stmt) {
