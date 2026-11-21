@@ -407,8 +407,13 @@ impl<'a> Gen<'a> {
                 self.bool_comparison(*op, l, r)
             }
             ExprKind::Binary(op, l, r) => {
-                let (l, r) = (self.operand(l), self.operand(r));
-                self.binary(*op, l, r, e.ty, e.id)
+                // The right operand runs after the left one, even past `&&` or `||`.
+                let left = self.operand(l);
+                let known = self.known_init.len();
+                self.after_operand(l);
+                let right = self.operand(r);
+                self.known_init.truncate(known);
+                self.binary(*op, left, right, e.ty, e.id)
             }
             // A variable that may be null takes a value that is not: the assignment's value is
             // that value, not the variable's `Option`.
@@ -625,6 +630,11 @@ impl<'a> Gen<'a> {
                 let code = self.method_call(receiver, target, args);
                 self.plain_call = None;
                 return code;
+            }
+            // A call of the method it names records that it ran the check of that method's
+            // class (`entry_named`), which `surely_initializes` credits to the call.
+            if target == index {
+                self.call_id = Some(e.id);
             }
             self.method_call(receiver, target, args)
         };

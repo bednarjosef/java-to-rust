@@ -1493,14 +1493,26 @@ impl<'a> Gen<'a> {
     }
 
     /// The arguments of a call of method `index`: borrowed parameters get borrows, optional ones
-    /// `Option`s, and others values.
+    /// `Option`s, and others values. An argument runs after the ones before it, so a class that
+    /// one of those surely initialized needs no check in it (`after_operand`).
     pub(super) fn call_args(&mut self, index: usize, args: &'a [Expr]) -> Vec<String> {
+        self.call_args_in(index, args, true)
+    }
+
+    /// `call_args`, for a caller that may run an argument's code before an earlier one's
+    /// (`in_order` false: `bind_params` computes some values before binding any): then no
+    /// argument counts on what the ones before it initialized.
+    pub(super) fn call_args_in(&mut self, index: usize, args: &'a [Expr], in_order: bool) -> Vec<String> {
         let params = &self.class.methods[index].params;
+        let known = self.known_init.len();
         let texts: Vec<String> = args
             .iter()
             .zip(params)
             .enumerate()
             .map(|(i, (a, p))| {
+                if let Some(before) = i.checked_sub(1).filter(|_| in_order) {
+                    self.after_operand(&args[before]);
+                }
                 if self.facts.borrowed_params.contains(&(index, i))
                     && self.facts.lent_strings.contains(&(index, i))
                 {
@@ -1536,6 +1548,7 @@ impl<'a> Gen<'a> {
                 }
             })
             .collect();
+        self.known_init.truncate(known);
         // A local that a later argument assigns (`casStack(p, p = p.next)`) is passed as a copy
         // of its value then, which Java passes: a borrow of the local itself would outlive the
         // assignment.
@@ -1937,9 +1950,10 @@ impl<'a> Gen<'a> {
         // Java initializes the class when `new` runs, before the arguments, which may see what
         // the initialization does; the constructor initializes it again, which does nothing.
         let init = self.init_call(self.class.methods[ctor].class).filter(|_| args.iter().any(sees_statics));
-        let args = self.call_args(ctor, args).join(", ");
+        let texts = self.call_args(ctor, args).join(", ");
         self.entry_call(id, ctor);
-        let path = self.qualified_fn(ctor) + self.entry_suffix(ctor);
+        let path = self.qualified_fn(ctor) + self.entry_suffix(ctor, args);
+        let args = texts;
         let path = match path.rsplit_once("::") {
             Some((owner, name)) if !turbofish.is_empty() => format!("{owner}{turbofish}::{name}"),
             _ => path,
@@ -2082,6 +2096,9 @@ impl<'a> Gen<'a> {
     /// `receiver.name(args)`, a call of an instance method. A method that borrows its object is
     /// called with method syntax, on a shared object through `borrow()` or `borrow_mut()`.
     pub(super) fn method_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
+        // The call this writes, where `method_call_expr` gives it: taken before the receiver and
+        // the arguments, whose calls give their own.
+        let id = self.call_id.take();
         if let Some(code) = self.inherited_call(receiver, index, args) {
             return code;
         }
@@ -2105,10 +2122,11 @@ impl<'a> Gen<'a> {
             if args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
                 return self.bound_call(receiver, index, args, "");
             }
-            let args = self.call_args(index, args).join(", ");
+            let texts = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.call_name(receiver, index)));
+            let name = self.entry_named(id, receiver, index, args);
+            return Code::atom(format!("{obj}.{path}{name}({texts})"));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else {
@@ -2129,10 +2147,27 @@ impl<'a> Gen<'a> {
             return self.bound_call(receiver, index, args, borrow);
         }
         let obj = self.object(receiver);
-        let args = self.call_args(index, args).join(", ");
+        let texts = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.call_name(receiver, index));
+        let name = self.entry_named(id, receiver, index, args);
+        let call = format!("{obj}{borrow}.{path}{name}({texts})");
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
+    }
+
+    /// The name that a call `receiver.name(args)` of method `index`, written after its receiver
+    /// and arguments, calls (`call_name`): for a split method of an enum (`enum_entry`), the
+    /// function without the check where the enum is known to be initialized
+    /// (`method_entry_suffix`). Either function has run the check once it returns, which call
+    /// `id` records (`entry_call`).
+    fn entry_named(&mut self, id: Option<ExprId>, receiver: &Expr, index: usize, args: &[Expr]) -> String {
+        let name = self.call_name(receiver, index);
+        if !self.split_entry(index) || !self.enum_entry(index) || name != self.fn_names[index] {
+            return name;
+        }
+        if let Some(id) = id {
+            self.entry_call(id, index);
+        }
+        name + self.method_entry_suffix(index, receiver, args)
     }
 
     /// A method call whose arguments are bound before the call borrows its object, in Java's order:
@@ -2784,9 +2819,10 @@ impl<'a> Gen<'a> {
         let mutable = initialize || uses_this(rest);
         match delegate {
             Some((args, index)) => {
-                let args = self.call_args(index, args).join(", ");
+                let texts = self.call_args(index, args).join(", ");
                 // The constructor's own class is initialized: this one runs in it.
-                let path = self.qualified_fn(index) + self.entry_suffix(index);
+                let path = self.qualified_fn(index) + self.entry_suffix(index, args);
+                let args = texts;
                 let call = match self.on_stack {
                     true if args.is_empty() => format!("{path}_on_stack({})", self.slot_param),
                     true => format!("{path}_on_stack({}, {args})", self.slot_param),
@@ -2877,9 +2913,10 @@ impl<'a> Gen<'a> {
         };
         match (hierarchy::embedded(self.facts, self.class, t), resolved) {
             (Some(_), Some(ctor)) => {
-                let args = self.call_args(*ctor, args).join(", ");
+                let texts = self.call_args(*ctor, args).join(", ");
                 // The superclass is initialized: its subclass, whose constructor runs, is.
-                let path = self.qualified_fn(*ctor) + self.entry_suffix(*ctor);
+                let path = self.qualified_fn(*ctor) + self.entry_suffix(*ctor, args);
+                let args = texts;
                 let call = Code::atom(format!("{path}({args})"));
                 (Some(self.raising(call, *ctor).text), rest)
             }

@@ -223,8 +223,9 @@ impl<'a> Gen<'a> {
             if index != t || (0..args.len()).any(|i| self.facts.borrowed_arrays.contains_key(&(t, i))) {
                 return None;
             }
-            let args = self.call_args(t, args);
-            let suffix = self.entry_suffix(t);
+            let texts = self.call_args(t, args);
+            let suffix = self.entry_suffix(t, args);
+            let args = texts;
             return Some(Code::atom(format!("{}{suffix}_on_stack({})", self.static_fn(t), with(args))));
         };
         if self.closure_type(receiver.ty).is_some() || self.inlined(receiver, index) {

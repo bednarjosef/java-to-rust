@@ -3041,8 +3041,9 @@ fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
             static int once(int v) { return v * 3; }
         }
         public class A {
+            static int three() { return Pos.once(2); }
             public static void main(String[] args) {
-                System.out.println(new Pos(1).next().x + Pos.once(2));
+                System.out.println(new Pos(1).next().x + three());
             }
         }",
     );
@@ -3052,7 +3053,8 @@ fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
             // Pos's constructor is called with its check (from A) and without (from Pos's own
             // code): two functions.
             "fn Pos__new(x: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x)\n}",
-            // Nothing calls `once` without its check: one function, which runs the check.
+            // Nothing calls `once` without its check (`three` calls it where nothing has checked
+            // Pos): one function, which runs the check.
             "fn once(v: i32) -> i32 {\n    init_pos();\n",
             // Only `super(..)` calls Vec's constructor, without its check.
             "Pos { base: Vec_Fields__new__initialized(x) }",
@@ -3060,6 +3062,162 @@ fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
     );
     // The split that stays keeps no trace of the marker that found it.
     assert_lacks(&rust, &["once__initialized", "fn Vec_Fields__new(", "entry_check"]);
+}
+
+#[test]
+fn a_class_checked_by_an_earlier_operand_is_not_checked_again() {
+    let rust = translate(
+        "class Sec {
+            static int shift;
+            static { shift = 4; System.out.println(\"sec\"); }
+            static int toSection(int v) { return v >> shift; }
+            static long pack(int x, int z) { return ((long) x << 32) | z; }
+        }
+        class Gate {
+            static { System.out.println(\"gate\"); }
+            static boolean open(int v) { return v > 2; }
+        }
+        public class A {
+            static long key(int x, int z) { return Sec.pack(Sec.toSection(x), Sec.toSection(z)); }
+            static int sum(int x, int z) { return Sec.toSection(x) + Sec.toSection(z); }
+            static boolean gates(int x) { return (x > 100 && Gate.open(x)) | Gate.open(x + 1); }
+            static boolean both(int x) { return Gate.open(x) && Gate.open(x - 1); }
+            static int choose(boolean b, int x) { return (b ? Sec.toSection(x) : 0) + Sec.toSection(x); }
+            public static void main(String[] args) {
+                System.out.println(key(16, 32) + sum(1, 2) + choose(false, 3));
+                System.out.println(gates(1) + \" \" + both(3));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A later argument, and the call itself, run after the first argument checked Sec.
+            "pack__initialized(to_section(x), to_section__initialized(z))",
+            // The right operand runs after the left one.
+            "to_section(x) + to_section__initialized(z)",
+            // Past `&&`, the right operand runs only once the left one has.
+            "open(x) && open__initialized(x - 1)",
+            // What runs only past `&&`, or in one branch of `?:`, may not run: the operand after
+            // it checks.
+            "(x > 100 && open(x)) | open(x + 1)",
+            "(if b { to_section(x) } else { 0 }) + to_section(x)",
+        ],
+    );
+}
+
+#[test]
+fn a_class_checked_by_a_condition_is_not_checked_in_its_branches() {
+    let rust = translate(
+        "class Sec {
+            static int shift;
+            static { shift = 4; System.out.println(\"sec\"); }
+            static int toSection(int v) { return v >> shift; }
+            static boolean inside(int v) { return v >= 0; }
+            static int[] spread(int[] a) { return a; }
+        }
+        public class A {
+            static int clamp(int x, int z) {
+                int r = 0;
+                if (Sec.inside(x)) {
+                    r = Sec.toSection(x);
+                } else if (Sec.inside(z)) {
+                    r = Sec.toSection(z);
+                }
+                return r;
+            }
+            static int maybe(int x, int y) {
+                int r = 0;
+                if (x > 5 && Sec.inside(y)) {
+                    r = Sec.toSection(y);
+                }
+                return r;
+            }
+            static int count(int x) {
+                int n = 0;
+                while (Sec.inside(x)) {
+                    x -= Sec.toSection(16);
+                    n++;
+                }
+                return n;
+            }
+            static int total(int[] base) {
+                int t = 0;
+                for (int v : Sec.spread(base)) {
+                    t += Sec.toSection(v);
+                }
+                return t;
+            }
+            public static void main(String[] args) {
+                int n = args.length;
+                System.out.println(clamp(n, n - 1) + maybe(n, 3) + count(40) + total(new int[] { 16, 32 }));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // The branches of an `if`, and the conditions of its `else if`s, run after its
+            // condition.
+            "to_section__initialized(x)",
+            "inside__initialized(z)",
+            "to_section__initialized(z)",
+            // What runs only past `&&` may not run: the branch checks.
+            "to_section(y)",
+            // The body of a `while` runs after its condition, and that of a loop over an array
+            // after the array.
+            "to_section__initialized(16)",
+            "to_section__initialized(v)",
+        ],
+    );
+}
+
+#[test]
+fn an_enum_method_called_after_its_enum_is_checked_skips_the_check() {
+    let rust = translate(
+        "enum Axis { X, Y, Z }
+        enum Dir {
+            DOWN(Axis.Y, 0, -1, 0), UP(Axis.Y, 0, 1, 0), NORTH(Axis.Z, 0, 0, -1);
+            static { System.out.println(\"dir\"); }
+            final Axis axis;
+            final int x, y, z;
+            Dir(Axis axis, int x, int y, int z) { this.axis = axis; this.x = x; this.y = y; this.z = z; }
+            int stepX() { return x; }
+            int stepY() { return y; }
+            int stepZ() { return z; }
+            int length() { return Math.abs(stepX()) + Math.abs(stepY()) + Math.abs(stepZ()); }
+        }
+        final class Pos {
+            final int x, y, z;
+            Pos(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
+            Pos relative(Dir d) { return new Pos(x + d.stepX(), y + d.stepY(), z + d.stepZ()); }
+            int flat(Dir d) {
+                int a = d.stepX();
+                return a + d.stepZ();
+            }
+        }
+        public class A {
+            public static void main(String[] args) {
+                Dir d = Dir.values()[args.length];
+                Pos p = new Pos(1, 2, 3).relative(d);
+                System.out.println(p.x + p.y + p.z + p.flat(d) + d.length());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A method of an enum whose fields are tables checks the enum, in a function of its
+            // own name, which calls the one with its code.
+            "fn step_y__initialized(self) -> i32 {",
+            // The first step checks Dir; the later ones, in later arguments or statements, and
+            // the enum's own calls do not.
+            ".step_x()",
+            ".step_y__initialized()",
+            ".step_z__initialized()",
+            "self.step_x__initialized()",
+        ],
+    );
 }
 
 #[test]

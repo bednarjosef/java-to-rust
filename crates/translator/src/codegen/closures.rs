@@ -454,7 +454,7 @@ impl<'a> Gen<'a> {
             let one_return = matches!(&self.class.methods[sub].body[..], [Stmt::Return(Some(_), _)]);
             let direct = !converts_result && self.ret_text(sub) == ret;
             if direct || (one_return && !self.facts.throwing.contains(&sub)) {
-                let values = self.call_args(sub, args);
+                let values = self.call_args_in(sub, args, false);
                 self.enter_method(sub);
                 self.bind_params(sub, &values);
                 if direct {
@@ -506,7 +506,7 @@ impl<'a> Gen<'a> {
     /// method returns early or throws, a closure called at once.
     pub(super) fn inline_call(&mut self, index: usize, args: &'a [Expr]) -> Code {
         let bound = self.bound_params == Some(index);
-        let values = if bound { Vec::new() } else { self.call_args(index, args) };
+        let values = if bound { Vec::new() } else { self.call_args_in(index, args, false) };
         let field_locals = self.field_locals.clone();
         let (this_struct, this_form) = (self.this_struct, self.this_form);
         let saved = self.set_aside();

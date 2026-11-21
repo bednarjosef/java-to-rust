@@ -74,9 +74,10 @@ impl<'a> Gen<'a> {
 
     /// The input bytes of `inflateBytesBytes` or `inflateBytesBuffer`, copied into a temporary,
     /// which it returns: the output may be the same array, which cannot be borrowed twice. Only
-    /// the bytes of the input are read (`java::copy_range`).
+    /// the bytes of the input are read (`java::copy_range`). The copy runs ahead of the statement
+    /// (`ahead_of_statement`).
     pub(super) fn input_copy(&mut self, input: &'a Expr, off: &str, len: &str) -> String {
-        let source = self.slice_of(input);
+        let source = self.ahead_of_statement(|g| g.slice_of(input));
         let copy = self.temp("input");
         let range = self.runtime("copy_range");
         self.line(&format!("let {copy} = {range}({source}, {off}, {len});"));

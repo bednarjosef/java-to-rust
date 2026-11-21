@@ -20,8 +20,9 @@ impl<'a> Gen<'a> {
         let (start, rest, initialize) = match body.split_first() {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
-                let args = self.call_args(index, args).join(", ");
-                let path = self.qualified_fn(index) + self.entry_suffix(index);
+                let texts = self.call_args(index, args).join(", ");
+                let path = self.qualified_fn(index) + self.entry_suffix(index, args);
+                let args = texts;
                 let call = Code::atom(format!("{path}({args})"));
                 if self.facts.throwing.contains(&index) {
                     delegated = Some(call.text.clone());

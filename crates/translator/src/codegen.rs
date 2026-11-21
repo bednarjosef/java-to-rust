@@ -790,6 +790,7 @@ impl<'a> Gen<'a> {
             after_body: &[],
             known_init: Vec::new(),
             entry_calls: HashSet::new(),
+            call_id: None,
             borrowed_optional_objects: HashSet::new(),
             int_receiver: false,
             double_receiver: false,
@@ -1075,13 +1076,18 @@ struct Gen<'a> {
     /// (`early_null_exit`).
     after_body: &'a [Expr],
     /// The classes whose initialization the statements written before the current one in its
-    /// block, or in a block around it, surely ran (`initialized_by`), as `(method, class)`: a use
-    /// of one of them needs no check (`uninitialized`). Each block forgets what its statements
-    /// added as it ends, and a closure's body starts with none.
+    /// block, or in a block around it, surely ran (`initialized_by`), or an operand that runs
+    /// before the code being written (`after_operand`), as `(method, class)`: a use of one of them
+    /// needs no check (`uninitialized`). Each block forgets what its statements added as it ends,
+    /// an expression what its operands added, and a closure's body starts with none.
     known_init: Vec<(usize, usize)>,
     /// The calls and `new`s of static methods and constructors that start with their class's
     /// initialization check, written as calls of their functions (`entry_call`).
     entry_calls: HashSet<ExprId>,
+    /// The method call that `method_call` writes next, which `method_call_expr` gives it where
+    /// the call runs the method it names, so that a call of an enum's split method is recorded
+    /// where it is written (`entry_named`).
+    call_id: Option<ExprId>,
     /// The current method's possibly-null object parameters that are borrowed as
     /// `&Option<Rc<..>>`: a read of one as a value clones it.
     borrowed_optional_objects: HashSet<String>,
