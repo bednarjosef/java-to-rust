@@ -389,17 +389,13 @@ impl Walk<'_> {
                 );
             }
             let dead = self.prepare(m);
-            let code = |e: &Expr| {
-                visit_expr(e, &mut |x| {
-                    if dead.contains(&x.id) { self.unresolved(x) } else { self.expr(m, ctx, x) }
-                })
-            };
-            let statement = |s: &Stmt| match s {
-                Stmt::Throw(e) if dead.contains(&e.id) => {}
-                _ => self.statement(m, ctx, s),
-            };
-            for s in &class.methods[m].body {
-                visit_stmt(s, &mut |e| code(e), &mut |s| statement(s));
+            for &step in &self.steps(m).walk {
+                match step {
+                    Step::Expr(x) if dead.contains(&x.id) => self.unresolved(x),
+                    Step::Expr(x) => self.expr(m, ctx, x),
+                    Step::Stmt(Stmt::Throw(e)) if dead.contains(&e.id) => {}
+                    Step::Stmt(s) => self.statement(m, ctx, s),
+                }
             }
             self.state.borrow_mut().known.env = Rc::default();
         }
@@ -483,6 +479,7 @@ impl Walk<'_> {
                 lists: main.lists,
                 concretes: main.concretes,
                 catches: main.catches,
+                steps: main.steps,
                 ..Memos::default()
             }
         };
@@ -688,7 +685,7 @@ struct Walk<'a> {
     /// methods that each call runs on each object, the concrete classes below each type, and
     /// whether a method has a `catch` clause. A method is walked again whenever what it relies on
     /// changes, and a call on a receiver that may be any class runs thousands of methods.
-    memos: RefCell<Memos>,
+    memos: RefCell<Memos<'a>>,
 }
 
 /// The code whose running stops a walk (`live_methods_unless`).
@@ -729,7 +726,7 @@ impl Stop {
 type Targets = Rc<[(usize, usize)]>;
 
 #[derive(Default)]
-struct Memos {
+struct Memos<'a> {
     targets: FastMap<(ExprId, usize), Targets>,
     /// Each list of targets once.
     lists: FastSet<Targets>,
@@ -738,6 +735,8 @@ struct Memos {
     classes: FastMap<usize, ClassSet>,
     /// Whether each method that was asked about has a `catch` clause (`Walk::dead_catches`).
     catches: FastMap<usize, bool>,
+    /// The steps of each method that was walked (`Steps`).
+    steps: FastMap<usize, Rc<Steps<'a>>>,
     /// What each call passed when it last ran all its targets, by call and list of targets
     /// (`Walk::call`).
     passed: FastMap<(ExprId, usize), Passed>,
@@ -749,6 +748,102 @@ struct Memos {
     /// The casts and `instanceof` tests whose value is in `LiveMethods::tested`, each with the
     /// object it runs on: what the value may be does not change from one walk to the next.
     tested: FastSet<(ExprId, usize)>,
+}
+
+/// What a walk of a method goes over, found once for each method rather than by walking its
+/// whole body on each walk, as each of the walk, its values (`Walk::env`, until none changes) and
+/// its dead code (`Walk::dead`) did, each over every expression twice (for those and for the
+/// statements of its switch expressions). Each list is in the order of a walk of the body.
+struct Steps<'a> {
+    /// The expressions that may run something (`Walk::expr`), have their value recorded
+    /// (`LiveMethods::tested`) or be an unresolved call (`Walk::unresolved`), and the `throw`
+    /// statements (`Walk::statement`).
+    walk: Vec<Step<'a>>,
+    /// What may give a local a value (`Walk::env`).
+    values: Vec<Step<'a>>,
+    /// The conditions that may leave code that cannot run (`Walk::dead`).
+    conditions: Vec<Step<'a>>,
+}
+
+/// An expression or a statement of a method's body.
+#[derive(Clone, Copy)]
+enum Step<'a> {
+    Expr(&'a Expr),
+    Stmt(&'a Stmt),
+}
+
+impl<'a> Walk<'a> {
+    /// The steps of method `m` (`Steps`, remembered).
+    fn steps(&self, m: usize) -> Rc<Steps<'a>> {
+        if let Some(found) = self.memos.borrow().steps.get(&m) {
+            return found.clone();
+        }
+        let steps = RefCell::new(Steps { walk: Vec::new(), values: Vec::new(), conditions: Vec::new() });
+        let class: &'a Class = self.class;
+        for s in &class.methods[m].body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        let mut steps = steps.borrow_mut();
+                        if self.runs_something(x) {
+                            steps.walk.push(Step::Expr(x));
+                        }
+                        if known::gives_value(x) {
+                            steps.values.push(Step::Expr(x));
+                        }
+                        if known::condition(x) {
+                            steps.conditions.push(Step::Expr(x));
+                        }
+                    })
+                },
+                &mut |s| {
+                    let mut steps = steps.borrow_mut();
+                    if matches!(s, Stmt::Throw(_)) {
+                        steps.walk.push(Step::Stmt(s));
+                    }
+                    if known::declares_value(s) {
+                        steps.values.push(Step::Stmt(s));
+                    }
+                    if known::conditional(s) {
+                        steps.conditions.push(Step::Stmt(s));
+                    }
+                },
+            );
+        }
+        let steps = Rc::new(steps.into_inner());
+        self.memos.borrow_mut().steps.insert(m, steps.clone());
+        steps
+    }
+
+    /// Whether `Walk::expr` may run or record something for `x`, or `Walk::unresolved` report it.
+    fn runs_something(&self, x: &Expr) -> bool {
+        let runs = match &x.kind {
+            ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::ThisCall { .. }
+            | ExprKind::SuperInit { .. }
+            | ExprKind::New { .. }
+            | ExprKind::Static { .. }
+            | ExprKind::EnumConstant { .. }
+            | ExprKind::Assign { target: Place::Static { .. }, .. }
+            | ExprKind::IncDec { target: Place::Static { .. }, .. }
+            | ExprKind::Builtin(
+                Builtin::InitializeClass { .. } | Builtin::Native(Native::Missing { .. }),
+                _,
+            ) => true,
+            ExprKind::Assign { target: Place::Field { .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { .. }, .. } => known::tracked(x.ty),
+            // What its value may be is recorded (`LiveMethods::tested`).
+            ExprKind::Cast(Type::Class(..), value)
+            | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } => {
+                matches!(value.ty, Type::Class(..))
+            }
+            _ => false,
+        };
+        runs || matches!(x.ty, Type::Enum(name) | Type::Class(name, _) if self.enum_named(name).is_some())
+            || object_values::hands(x)
+    }
 }
 
 /// What a call passed the methods it runs (`Walk::call`): what was known of the argument at

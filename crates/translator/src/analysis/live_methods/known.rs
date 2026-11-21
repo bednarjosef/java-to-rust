@@ -162,6 +162,31 @@ pub(super) fn tracked(ty: Type) -> bool {
     matches!(ty, Type::Int | Type::Long | Type::Short | Type::Byte | Type::Char | Type::Boolean)
 }
 
+/// Whether `x` may give a local a value (`Walk::env`).
+pub(super) fn gives_value(x: &Expr) -> bool {
+    matches!(
+        x.kind,
+        ExprKind::Assign { target: Place::Var(_), .. }
+            | ExprKind::IncDec { target: Place::Var(_), .. }
+            | ExprKind::InstanceOf { binding: Some(_), .. }
+    )
+}
+
+/// Whether the statement `s` may give a local a value (`Walk::env`).
+pub(super) fn declares_value(s: &Stmt) -> bool {
+    matches!(s, Stmt::Local { .. } | Stmt::ForEach { .. } | Stmt::Try { .. })
+}
+
+/// Whether `x` decides whether a part of it runs (`Walk::dead`).
+pub(super) fn condition(x: &Expr) -> bool {
+    matches!(x.kind, ExprKind::Binary(BinOp::And | BinOp::Or, ..) | ExprKind::Conditional(..))
+}
+
+/// Whether the statement `s` decides whether a part of it runs (`Walk::dead`).
+pub(super) fn conditional(s: &Stmt) -> bool {
+    matches!(s, Stmt::If { .. } | Stmt::While { .. } | Stmt::For { cond: Some(_), .. })
+}
+
 impl Walk<'_> {
     /// The fields that hold captured locals, which constructors set from parameters that the
     /// translation adds: none of them is known.
@@ -364,9 +389,13 @@ impl Walk<'_> {
             Stmt::Try { catches, .. } => catches.iter().for_each(|c| give(&c.name, None)),
             _ => {}
         };
+        let steps = self.steps(m);
         while changed.replace(false) {
-            for s in &method.body {
-                visit_stmt(s, &mut |e| visit_expr(e, &mut |x| note_expr(x)), &mut |s| note_stmt(s));
+            for &step in &steps.values {
+                match step {
+                    Step::Expr(x) => note_expr(x),
+                    Step::Stmt(s) => note_stmt(s),
+                }
             }
         }
         env.into_inner()
@@ -384,22 +413,19 @@ impl Walk<'_> {
         };
         let mark_stmt = |s: &Stmt| visit_stmt(s, &mut |e| mark_expr(e), &mut |_| {});
         let known = |e: &Expr| self.known(m, e);
-        for s in &self.class.methods[m].body {
-            visit_stmt(
-                s,
-                &mut |e| {
-                    visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Binary(BinOp::And, l, r) if known(l) == Some(0) => mark_expr(r),
-                        ExprKind::Binary(BinOp::Or, l, r) if known(l).is_some_and(|v| v != 0) => mark_expr(r),
-                        ExprKind::Conditional(c, a, b) => match known(c) {
-                            Some(0) => mark_expr(a),
-                            Some(_) => mark_expr(b),
-                            None => {}
-                        },
-                        _ => {}
-                    })
+        for &step in &self.steps(m).conditions {
+            match step {
+                Step::Expr(x) => match &x.kind {
+                    ExprKind::Binary(BinOp::And, l, r) if known(l) == Some(0) => mark_expr(r),
+                    ExprKind::Binary(BinOp::Or, l, r) if known(l).is_some_and(|v| v != 0) => mark_expr(r),
+                    ExprKind::Conditional(c, a, b) => match known(c) {
+                        Some(0) => mark_expr(a),
+                        Some(_) => mark_expr(b),
+                        None => {}
+                    },
+                    _ => {}
                 },
-                &mut |s| match s {
+                Step::Stmt(s) => match s {
                     Stmt::If { cond, then, otherwise } => match known(cond) {
                         Some(0) => mark_stmt(then),
                         Some(_) => otherwise.iter().for_each(|o| mark_stmt(o)),
@@ -412,7 +438,7 @@ impl Walk<'_> {
                     }
                     _ => {}
                 },
-            );
+            }
         }
         dead.into_inner()
     }
