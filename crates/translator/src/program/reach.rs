@@ -3246,8 +3246,10 @@ impl<'t> Walk<'t> {
     /// was external, and nothing was reached through it that a walk from the start would not
     /// reach. Reflection's lookups in these classes, and the reflection metadata that names
     /// their members, are made again, as they may now find more. The rest of each unit is the
-    /// same as before: completing a record does nothing else that depends on the other units, and
-    /// the `implicit` marks it changes in `hashCode` and `equals` are not read here.
+    /// same as before, but for what completing a record writes into `hashCode` and `equals`: the
+    /// `implicit` marks, which are not read here, and how they hash and compare a component whose
+    /// class a later unit declared (`javac::Completion::same_members`), which the walk does not
+    /// take up, keeping what it reached through the code of them that it walked.
     fn redeclare_units(&mut self, units: &[&'t Value]) {
         if units.is_empty() {
             return;
