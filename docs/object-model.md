@@ -488,16 +488,20 @@ BlockPos(..)` from another class checks `BlockPos` once and its `super(..)` call
 constructor without a check (Java's `super(..)` initializes nothing, and `Vec3i` was initialized
 before `BlockPos`), and `new BlockPos(..)` in `BlockPos`'s own methods checks nothing. A loop of
 the Minecraft server that made a `BlockPos` in another class's method tested both flags on every
-pass. A generic static method, whose type arguments the call of the second function would have
-to name, keeps the check in its one function. Once the whole program is written, a split whose
-second function only the first calls is joined back into one function that runs the check and
-then the code, and a first function that nothing calls (a constructor that only subclasses'
-`super(..)` call) is left out (`join_unused_entry_splits`): each function is one more for rustc
-to hold, and without this the Minecraft server's header crate had a fifth more functions than
-it needed. A method that lowering adds for an expression
-(`Method::added`, `lower/added_methods.rs`), such as the one every `Class.forName` with a
-computed name calls, is put in the class whose code it first meets but stands for the code at
-its call sites, so calling it does not initialize that class.
+pass. An instance method of an enum whose fields are tables (`lower/enum_tables.rs`) starts with the
+check too, as a constant exists before its enum is initialized and the method reads rows of the
+tables that the initialization fills; such a method is split the same way where no constant's body
+overrides it (`enum_entry`), and a call of it by name after a checked use calls the second function,
+so that `pos.relative(d)`, which reads `d`'s three steps, checks `Direction` once. A generic static
+method, whose type arguments the call of the second function would have to name, keeps the check in
+its one function. Once the whole program is written, a split whose second function only the first
+calls is joined back into one function that runs the check and then the code, and a first function
+that nothing calls (a constructor that only subclasses' `super(..)` call) is left out
+(`join_unused_entry_splits`): each function is one more for rustc to hold, and without this the
+Minecraft server's header crate had a fifth more functions than it needed. A method that lowering
+adds for an expression (`Method::added`, `lower/added_methods.rs`), such as the one every
+`Class.forName` with a computed name calls, is put in the class whose code it first meets but stands
+for the code at its call sites, so calling it does not initialize that class.
 
 ### 1.5 `instanceof`, patterns and casts
 

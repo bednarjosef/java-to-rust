@@ -2083,6 +2083,9 @@ impl<'a> Gen<'a> {
     /// `receiver.name(args)`, a call of an instance method. A method that borrows its object is
     /// called with method syntax, on a shared object through `borrow()` or `borrow_mut()`.
     pub(super) fn method_call(&mut self, receiver: &'a Expr, index: usize, args: &'a [Expr]) -> Code {
+        // The call this writes, where `method_call_expr` gives it: taken before the receiver and
+        // the arguments, whose calls give their own.
+        let id = self.call_id.take();
         if let Some(code) = self.inherited_call(receiver, index, args) {
             return code;
         }
@@ -2106,10 +2109,11 @@ impl<'a> Gen<'a> {
             if args.iter().any(|a| changes_object(a, receiver, &self.facts.mutating)) {
                 return self.bound_call(receiver, index, args, "");
             }
-            let args = self.call_args(index, args).join(", ");
+            let texts = self.call_args(index, args).join(", ");
             let obj = self.object(receiver);
             let path = self.method_path(receiver, index);
-            return Code::atom(format!("{obj}.{path}{}({args})", self.call_name(receiver, index)));
+            let name = self.entry_named(id, receiver, index, args);
+            return Code::atom(format!("{obj}.{path}{name}({texts})"));
         }
         let borrow = if mutating { ".borrow_mut()" } else { ".borrow()" };
         let Type::Class(class, _) = receiver.ty else {
@@ -2130,10 +2134,27 @@ impl<'a> Gen<'a> {
             return self.bound_call(receiver, index, args, borrow);
         }
         let obj = self.object(receiver);
-        let args = self.call_args(index, args).join(", ");
+        let texts = self.call_args(index, args).join(", ");
         let path = self.method_path(receiver, index);
-        let call = format!("{obj}{borrow}.{path}{}({args})", self.call_name(receiver, index));
+        let name = self.entry_named(id, receiver, index, args);
+        let call = format!("{obj}{borrow}.{path}{name}({texts})");
         Code::atom(if self.guarded { format!("{{ {call} }}") } else { call })
+    }
+
+    /// The name that a call `receiver.name(args)` of method `index`, written after its receiver
+    /// and arguments, calls (`call_name`): for a split method of an enum (`enum_entry`), the
+    /// function without the check where the enum is known to be initialized
+    /// (`method_entry_suffix`). Either function has run the check once it returns, which call
+    /// `id` records (`entry_call`).
+    fn entry_named(&mut self, id: Option<ExprId>, receiver: &Expr, index: usize, args: &[Expr]) -> String {
+        let name = self.call_name(receiver, index);
+        if !self.split_entry(index) || !self.enum_entry(index) || name != self.fn_names[index] {
+            return name;
+        }
+        if let Some(id) = id {
+            self.entry_call(id, index);
+        }
+        name + self.method_entry_suffix(index, receiver, args)
     }
 
     /// A method call whose arguments are bound before the call borrows its object, in Java's order:

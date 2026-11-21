@@ -10,9 +10,9 @@
 //! first, as Java initializes a class on first use, unless the class is known to be initialized
 //! there (`uninitialized`). The `init` function is inlined and only tests whether initialization
 //! has started; `init_..._slow`, out of line, runs it. A static method or constructor that starts
-//! with the call is two functions (`split_entry`), so that a caller that knows the class is
-//! initialized calls the one without it; where callers of only one kind exist, the written
-//! program has one function again (`join_unused_entry_splits`).
+//! with the call, or an instance method of an enum that does, is two functions (`split_entry`), so
+//! that a caller that knows the class is initialized calls the one without it; where callers of
+//! only one kind exist, the written program has one function again (`join_unused_entry_splits`).
 //!
 //! In a program that starts threads, the statics that the started threads' code may touch
 //! (`Facts::process_statics`, by class) have one copy for the process: a primitive is a
@@ -579,11 +579,49 @@ impl<'a> Gen<'a> {
     pub(super) fn split_entry(&self, index: usize) -> bool {
         let m = &self.class.methods[index];
         self.facts.entry_init.contains(&index)
-            && (m.is_static || m.is_ctor)
+            && (m.is_static || m.is_ctor || self.enum_entry(index))
             && !m.is_main
             && m.type_params.is_empty()
             && !self.class.is_initializer(index)
             && self.facts.init_class(self.class, m.class).is_some()
+    }
+
+    /// Whether `index` is an instance method of an enum whose constants its static
+    /// initialization builds (`lower/enum_tables.rs`), which starts with its class's check
+    /// (`entry_inits`): a constant exists before its enum is initialized, while the fields it
+    /// reads are rows of tables that the initialization fills. Such a method is split as a static
+    /// method is (`split_entry`) where it is written as a method of the enum's value, which no
+    /// constant's body overrides, and its code is not a plain body called through a wrapper
+    /// (`written_plain`). A call written with its name (`Gen::method_call`) calls the function
+    /// without the check where the enum is known to be initialized (`method_entry_suffix`), as
+    /// in `pos.relative(d)`, which reads `d`'s three steps: the first call checks `Direction`.
+    pub(super) fn enum_entry(&self, index: usize) -> bool {
+        let m = &self.class.methods[index];
+        !m.is_static
+            && !m.is_ctor
+            && !m.is_abstract
+            && self.class.types[m.class].enum_constants.is_some()
+            && matches!(self.homes[index], Home::Class(t) if t == m.class)
+            && !self.class.hierarchy.has_subtypes(m.class)
+            && !self.class.hierarchy.is_overridden(index)
+            && !self.written_plain(index)
+    }
+
+    /// `entry_suffix` for a call of instance method `index` on `receiver`: the call runs after
+    /// both the receiver and the arguments, so either may have initialized the class.
+    pub(super) fn method_entry_suffix(&self, index: usize, receiver: &Expr, args: &[Expr]) -> &'static str {
+        match self.entry_suffix(index, args) {
+            "" if self.split_entry(index) => {
+                let class = self.class.methods[index].class;
+                let mut found = Vec::new();
+                self.surely_initializes(receiver, &mut found);
+                let known = self
+                    .uninitialized(class)
+                    .is_some_and(|init| found.iter().any(|&k| self.implies(k, init)));
+                if known { INITIALIZED } else { "" }
+            }
+            suffix => suffix,
+        }
     }
 
     /// What a call of static method or constructor `index` with arguments `args` written here
@@ -630,10 +668,10 @@ impl<'a> Gen<'a> {
     /// through a check written in this method (`init_call`): one for a read or write of a static
     /// that is not a constant, an enum constant, or `Class.forName`, where the statement surely
     /// evaluates it; or through the check a called function starts with: a call or `new` of a
-    /// static method or constructor that has one (`entry_call`). Once the check passed, the class
-    /// is initialized, or this thread is running its initialization, and a second check would
-    /// pass too. Anything inside a lambda, past `&&`, `||` or `?`, or in a switch's cases, which
-    /// may not run, is left out.
+    /// static method or constructor that has one, or a call of an enum's split method
+    /// (`entry_call`). Once the check passed, the class is initialized, or this thread is running
+    /// its initialization, and a second check would pass too. Anything inside a lambda, past `&&`,
+    /// `||` or `?`, or in a switch's cases, which may not run, is left out.
     pub(super) fn initialized_by(&self, stmt: &Stmt) -> Vec<usize> {
         let mut found = Vec::new();
         match stmt {
@@ -695,8 +733,8 @@ impl<'a> Gen<'a> {
             }
             _ => {}
         }
-        // A call of a static method or constructor that starts with its class's check, written as
-        // a call of its function (`entry_calls`), has run the check once it returns.
+        // A call of a method or constructor that starts with its class's check, written as a call
+        // of its function (`entry_calls`), has run the check once it returns.
         if let ExprKind::Call { resolved: Some(m), .. }
         | ExprKind::MethodCall { resolved: Some(m), .. }
         | ExprKind::New { ctor: Some(m), .. } = &e.kind
@@ -707,12 +745,13 @@ impl<'a> Gen<'a> {
     }
 
     /// Records that call or `new` `e` of method `index` is written as a call of its function, so
-    /// that a statement that surely runs it initializes the class of a method that starts with
-    /// its class's check (`surely_initializes`); a `new` of a lambda that becomes a Rust closure,
-    /// say, calls no constructor.
+    /// that a statement that surely runs it initializes the class of a static method or
+    /// constructor that starts with its class's check, or of an enum's split method
+    /// (`surely_initializes`); a `new` of a lambda that becomes a Rust closure, say, calls no
+    /// constructor, and a call of an instance method may be inlined or dispatched.
     pub(super) fn entry_call(&mut self, e: ExprId, index: usize) {
         let m = &self.class.methods[index];
-        if self.facts.entry_init.contains(&index) && (m.is_static || m.is_ctor) {
+        if self.facts.entry_init.contains(&index) && (m.is_static || m.is_ctor || self.split_entry(index)) {
             self.entry_calls.insert(e);
         }
     }

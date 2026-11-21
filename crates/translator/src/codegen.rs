@@ -774,6 +774,7 @@ impl<'a> Gen<'a> {
             after_body: &[],
             known_init: Vec::new(),
             entry_calls: HashSet::new(),
+            call_id: None,
             borrowed_optional_objects: HashSet::new(),
             int_receiver: false,
             double_receiver: false,
@@ -1038,6 +1039,10 @@ struct Gen<'a> {
     /// The calls and `new`s of static methods and constructors that start with their class's
     /// initialization check, written as calls of their functions (`entry_call`).
     entry_calls: HashSet<ExprId>,
+    /// The method call that `method_call` writes next, which `method_call_expr` gives it where
+    /// the call runs the method it names, so that a call of an enum's split method is recorded
+    /// where it is written (`entry_named`).
+    call_id: Option<ExprId>,
     /// The current method's possibly-null object parameters that are borrowed as
     /// `&Option<Rc<..>>`: a read of one as a value clones it.
     borrowed_optional_objects: HashSet<String>,

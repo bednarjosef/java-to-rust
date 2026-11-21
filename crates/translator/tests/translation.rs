@@ -2965,6 +2965,54 @@ fn a_class_checked_by_an_earlier_operand_is_not_checked_again() {
 }
 
 #[test]
+fn an_enum_method_called_after_its_enum_is_checked_skips_the_check() {
+    let rust = translate(
+        "enum Axis { X, Y, Z }
+        enum Dir {
+            DOWN(Axis.Y, 0, -1, 0), UP(Axis.Y, 0, 1, 0), NORTH(Axis.Z, 0, 0, -1);
+            static { System.out.println(\"dir\"); }
+            final Axis axis;
+            final int x, y, z;
+            Dir(Axis axis, int x, int y, int z) { this.axis = axis; this.x = x; this.y = y; this.z = z; }
+            int stepX() { return x; }
+            int stepY() { return y; }
+            int stepZ() { return z; }
+            int length() { return Math.abs(stepX()) + Math.abs(stepY()) + Math.abs(stepZ()); }
+        }
+        final class Pos {
+            final int x, y, z;
+            Pos(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
+            Pos relative(Dir d) { return new Pos(x + d.stepX(), y + d.stepY(), z + d.stepZ()); }
+            int flat(Dir d) {
+                int a = d.stepX();
+                return a + d.stepZ();
+            }
+        }
+        public class A {
+            public static void main(String[] args) {
+                Dir d = Dir.values()[args.length];
+                Pos p = new Pos(1, 2, 3).relative(d);
+                System.out.println(p.x + p.y + p.z + p.flat(d) + d.length());
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A method of an enum whose fields are tables checks the enum, in a function of its
+            // own name, which calls the one with its code.
+            "fn step_y__initialized(self) -> i32 {",
+            // The first step checks Dir; the later ones, in later arguments or statements, and
+            // the enum's own calls do not.
+            ".step_x()",
+            ".step_y__initialized()",
+            ".step_z__initialized()",
+            "self.step_x__initialized()",
+        ],
+    );
+}
+
+#[test]
 fn static_initializers_without_effects_stay_lazy() {
     let rust = translate(
         "class A {

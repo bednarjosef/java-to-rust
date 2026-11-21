@@ -631,6 +631,11 @@ impl<'a> Gen<'a> {
                 self.plain_call = None;
                 return code;
             }
+            // A call of the method it names records that it ran the check of that method's
+            // class (`entry_named`), which `surely_initializes` credits to the call.
+            if target == index {
+                self.call_id = Some(e.id);
+            }
             self.method_call(receiver, target, args)
         };
         if self.class.methods[index].is_static {
