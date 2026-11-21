@@ -972,12 +972,15 @@ impl<'a> Gen<'a> {
 
     /// Rejects the program when an operation of `Facts::catching` that is written does not run
     /// inside `java::catching`: each such operation, first to last, as the generator reports
-    /// what it rejects (`generate_all`), so that a census stubs them all in one round.
+    /// what it rejects (`generate_all`), so that a census stubs them all in one round. One in the
+    /// arguments of a native that the runtime does not have is not written
+    /// (`missing_native_arguments`).
     pub(super) fn check_catching(&mut self) {
         // Mostly every one is written in it, and then no code needs a look.
         if self.facts.catching.keys().all(|id| self.dereferenced.contains(id)) {
             return;
         }
+        let unwritten = self.missing_native_arguments();
         let mut missed: Vec<Pos> = Vec::new();
         for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
             for stmt in &method.body {
@@ -987,6 +990,7 @@ impl<'a> Gen<'a> {
                         visit_expr(e, &mut |x| {
                             if let Some(&pos) = self.facts.catching.get(&x.id)
                                 && !self.dereferenced.contains(&x.id)
+                                && !unwritten.contains(&x.id)
                             {
                                 missed.push(pos);
                             }
@@ -1004,11 +1008,14 @@ impl<'a> Gen<'a> {
 
     /// Rejects the program when a cast of `Facts::raising` that is written is not in the checked
     /// form, where its `ClassCastException` would end the program instead of reaching the `catch`
-    /// or the `finally`: each such cast, first to last, as `check_catching` does.
+    /// or the `finally`: each such cast, first to last, as `check_catching` does. One in the
+    /// arguments of a native that the runtime does not have is not written
+    /// (`missing_native_arguments`).
     pub(super) fn check_casts(&mut self) {
         if self.facts.raising.iter().all(|id| self.dereferenced.contains(id)) {
             return;
         }
+        let unwritten = self.missing_native_arguments();
         let mut missed: Vec<Pos> = Vec::new();
         for (_, method) in self.class.methods.iter().enumerate().filter(|(i, _)| self.written.contains(i)) {
             for stmt in &method.body {
@@ -1019,6 +1026,7 @@ impl<'a> Gen<'a> {
                             if matches!(x.kind, ExprKind::Cast(..))
                                 && self.facts.raising.contains(&x.id)
                                 && !self.dereferenced.contains(&x.id)
+                                && !unwritten.contains(&x.id)
                             {
                                 missed.push(x.pos);
                             }

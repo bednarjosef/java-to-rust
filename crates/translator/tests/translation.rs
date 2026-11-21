@@ -4971,13 +4971,108 @@ public class Main {
 }
 
 #[test]
-fn a_census_stubs_every_cast_the_generator_misses_in_one_round() {
+fn a_census_stubs_every_local_the_generator_rejects_in_one_round() {
+    // The generator rejects the local of each of three methods, as `Drain`'s (methods that return
+    // an `int`: one that returns an object reports its error twice, and the second, which the
+    // stub of the first took away, would run the analyses again). It rejects each one, not only
+    // the first, so that one round stubs the three methods, and the generator goes on with the
+    // stubs in the same run, on the facts of the analyses, which run once. Those facts no longer
+    // hold the dereference of the code a stub replaced (`name.length()`, whose
+    // `NullPointerException` a `catch` sees), which the generator would find not written.
+    let main = r#"public class Main {
+    public static void main(String[] args) {
+        System.out.println(Drains.drain(args.length > 4));
+        System.out.println(Drains.again(args.length > 5));
+        try {
+            System.out.println(Drains.named(args.length > 6, null));
+        } catch (NullPointerException e) {
+            System.out.println("npe");
+        }
+    }
+}
+"#;
+    let drains = r#"class Drains {
+    static int drain(boolean fail) {
+        Object tasks;
+        try {
+            switch (fail ? 1 : 0) {
+                case 0:
+                    if (fail) { tasks = "early"; break; }
+                    tasks = new Object();
+                    break;
+                default:
+                    throw new IllegalStateException("no");
+            }
+        } catch (IllegalStateException e) {
+            tasks = e;
+        }
+        return tasks != null ? 1 : 0;
+    }
+
+    static int again(boolean fail) {
+        Object tasks;
+        try {
+            switch (fail ? 1 : 0) {
+                case 0:
+                    if (fail) { tasks = "late"; break; }
+                    tasks = new Object();
+                    break;
+                default:
+                    throw new IllegalStateException("again");
+            }
+        } catch (IllegalStateException e) {
+            tasks = e;
+        }
+        return tasks != null ? 1 : 0;
+    }
+
+    static int named(boolean fail, String name) {
+        Object tasks;
+        try {
+            switch (fail ? 1 : 0) {
+                case 0:
+                    if (fail) { tasks = "named"; break; }
+                    tasks = new Object();
+                    break;
+                default:
+                    throw new IllegalStateException("named");
+            }
+        } catch (IllegalStateException e) {
+            tasks = e;
+        }
+        return (tasks != null ? 1 : 0) + name.length();
+    }
+}
+"#;
+    let dir = write_sources("census_rejected_locals", &[("Main.java", main), ("Drains.java", drains)]);
+    let program = java_to_rust::Program { main: "Main".into(), sources: vec![dir], ..Default::default() };
+    let ((taken, rounds), runs) = java_to_rust::program::runs_of_generator(|| {
+        java_to_rust::program::rounds_of_analyses(|| census(&program))
+    });
+    assert_contains(
+        &taken.report,
+        &[
+            "       3  a local of type `Object` declared without a value and assigned in a `try` block not supported yet\n          at Drains.java:3:9, Drains.java:20:9, Drains.java:37:9\n",
+        ],
+    );
+    assert_lacks(&taken.report, &["NullPointerException"]);
+    assert_eq!(rounds, 1, "{}", taken.report);
+    assert_eq!(runs, 1, "{}", taken.report);
+    // The same as with a run of the generator for the stubs, the translation too.
+    let program = java_to_rust::Program { ends_rejected: true, ..program };
+    let (once, again) = (census(&program), java_to_rust::program::generator_again(|| census(&program)));
+    assert_eq!(once.report, again.report);
+    assert_eq!(once.json, again.json);
+    let rust = once.modules.expect("a translation").one_file();
+    assert_eq!(rust, again.modules.expect("a translation").one_file());
+}
+
+#[test]
+fn a_census_writes_no_check_of_a_cast_in_the_arguments_of_a_native_that_the_runtime_lacks() {
     // A cast whose `ClassCastException` a `catch` sees, in the argument of a native that the
-    // runtime lacks, is not written (the call is code that never runs), so the generator rejects
-    // it (`Gen::check_casts`). Each such cast is rejected, not only the first, so that one round
-    // stubs the three methods, and the generator goes on with the stubs in the same run, on the
-    // facts of the analyses, which run once. Those facts no longer hold the dereference of the
-    // code a stub replaced (`name.length()`), which the generator would find not written.
+    // runtime lacks, is not written (the call is code that never runs, `Native::Missing`), as a
+    // dereference there is not: the generator rejects neither, and writes the three methods,
+    // with the calls of the natives as code that never runs.
     let peers = r#"package jdk.peers;
 
 public class Peers {
@@ -5056,21 +5151,13 @@ public class Main {
     let ((taken, rounds), runs) = java_to_rust::program::runs_of_generator(|| {
         java_to_rust::program::rounds_of_analyses(|| census(&program))
     });
-    assert_contains(
-        &taken.report,
-        &[
-            "       3  catching the `ClassCastException` of this cast not supported yet\n          at jdk/peers/Peers.java:22:22, jdk/peers/Peers.java:26:18, jdk/peers/Peers.java:33:22\n",
-        ],
-    );
-    assert_eq!(rounds, 1, "{}", taken.report);
-    assert_eq!(runs, 1, "{}", taken.report);
-    // The same as with a run of the generator for the stubs, the translation too.
+    assert_lacks(&taken.report, &["ClassCastException", "NullPointerException"]);
+    assert_contains(&taken.report, &["jdk.peers.Peers.focusNative(long)void"]);
+    assert_eq!((rounds, runs), (1, 1), "{}", taken.report);
     let program = java_to_rust::Program { ends_rejected: true, ..program };
-    let (once, again) = (census(&program), java_to_rust::program::generator_again(|| census(&program)));
-    assert_eq!(once.report, again.report);
-    assert_eq!(once.json, again.json);
-    let rust = once.modules.expect("a translation").one_file();
-    assert_eq!(rust, again.modules.expect("a translation").one_file());
+    let rust = census(&program).modules.expect("a translation").one_file();
+    assert_contains(&rust, &["the native method jdk.peers.Peers.focusNative(long)void never runs"]);
+    assert_lacks(&rust, &["not_translated"]);
 }
 
 #[test]
