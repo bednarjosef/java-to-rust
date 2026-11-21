@@ -205,6 +205,7 @@ fn walk(
         class,
         values,
         fast,
+        receivers: true,
         glue: object_values::runtime_called_for_dispatch(class).into_iter().collect(),
         glue_declared: glue_declared(class),
         supers: supers(class),
@@ -256,13 +257,15 @@ fn walk(
         walk.handed(STATIC, STATIC, e);
     }
     walk.run();
-    let thread_statics = {
+    // The walk of the started threads takes what this walk knows, so this one's state is not
+    // borrowed while it runs.
+    let finished = {
         let state = walk.state.borrow();
-        if state.unknown.is_none() && !state.stopped {
-            crate::timings::phase("live walk of the started threads", || walk.thread_statics())
-        } else {
-            None
-        }
+        state.unknown.is_none() && !state.stopped
+    };
+    let thread_statics = match finished {
+        true => crate::timings::phase("live walk of the started threads", || walk.thread_statics()),
+        false => None,
     };
     let Walk { state, .. } = walk;
     let State { unknown, mut live, stopped, .. } = state.into_inner();
@@ -437,12 +440,16 @@ impl Walk<'_> {
     /// type that the thread's code reads or writes a static of, calls a static method or
     /// constructor of, or names an enum constant of; and it runs the field initializers of every
     /// class that the thread's code creates an object of (`State::built`).
+    ///
+    /// It needs only the types that it initializes, so it records no receivers and no values of
+    /// casts and tests (`LiveMethods::tested`), and it takes what this walk found the calls run
+    /// (`Memos::targets`), as the facts are the same, and what this walk knows, which this walk
+    /// no longer needs.
     fn thread_statics(&self) -> Option<FastSet<usize>> {
         let class = self.class;
-        let main = self.state.borrow();
         let mut roots: Vec<(usize, &Expr)> = Vec::new();
         let mut starts = false;
-        for &m in &main.live.methods {
+        for &m in &self.state.borrow().live.methods {
             for s in &class.methods[m].body {
                 visit_stmt(
                     s,
@@ -466,10 +473,17 @@ impl Walk<'_> {
         if !starts {
             return None;
         }
+        let memos = {
+            let main = std::mem::take(&mut *self.memos.borrow_mut());
+            Memos { targets: main.targets, lists: main.lists, concretes: main.concretes, ..Memos::default() }
+        };
+        let known = std::mem::take(&mut self.state.borrow_mut().known);
+        let main = self.state.borrow();
         let thread = Walk {
             class,
             values: self.values,
             fast: self.fast,
+            receivers: false,
             glue: self.glue.clone(),
             glue_declared: self.glue_declared.clone(),
             supers: self.supers.clone(),
@@ -487,7 +501,7 @@ impl Walk<'_> {
                 contexts: FastMap::default(),
                 catching: FastMap::default(),
                 glued: FastSet::default(),
-                known: main.known.clone(),
+                known,
                 unknown: None,
                 live: LiveMethods {
                     methods: FastSet::default(),
@@ -508,7 +522,7 @@ impl Walk<'_> {
                 glued_any: FastSet::default(),
                 stopped: false,
             }),
-            memos: RefCell::default(),
+            memos: RefCell::new(memos),
         };
         for e in &class.raised {
             thread.code(STATIC, STATIC, e);
@@ -640,6 +654,10 @@ struct Walk<'a> {
     /// objects return the same literal again (`same_literal`).
     /// `JAVA_TO_RUST_LIVE_CHECK` checks that the walk finds the same without.
     fast: bool,
+    /// Whether the walk records the classes of the receivers of the calls (`LiveMethods::receivers`)
+    /// and what the values of casts and tests of classes may be (`LiveMethods::tested`): the walk
+    /// of the started threads keeps only the types it initializes (`thread_statics`).
+    receivers: bool,
     glue: Vec<usize>,
     /// The groups of `glue` that each type declares a method of (`glue_declared`).
     glue_declared: Vec<Vec<usize>>,
@@ -1035,8 +1053,9 @@ impl Walk<'_> {
         }
         // What the value of a cast or a test of a class may be, which may let the code generator
         // test fewer classes (`Class::tested`).
-        if let ExprKind::Cast(Type::Class(..), value)
-        | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } = &x.kind
+        if self.receivers
+            && let ExprKind::Cast(Type::Class(..), value)
+            | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } = &x.kind
             && matches!(value.ty, Type::Class(..))
             && (!self.fast || self.memos.borrow_mut().tested.insert((x.id, ctx)))
         {
@@ -1090,7 +1109,8 @@ impl Walk<'_> {
             }
             None => None,
         };
-        if let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
+        if self.receivers
+            && let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
             && !self.class.methods[*r].is_static
         {
             let mut state = self.state.borrow_mut();
