@@ -557,6 +557,11 @@ later frees during its exit go straight back to the heap.
 - `JAVA_GC_EVERY=<bytes>` collects after that many bytes instead, down to a collection every
   few allocations, so that a pointer the collector misses shows quickly as a crash or wrong
   output. A change to the collector or the runtime is checked by running the corpus with it set.
+- `JAVA_GC_START_DELAY=<milliseconds>` holds every starting thread that long before it
+  registers, so that collections run while its closure is kept only by its entry of `STARTING`.
+  `tests/thread_starts.rs` starts threads whose closures hold the only handles of objects that
+  weak references watch, takes new spans in every size, collects, and finds no referent cleared;
+  with the entries holding something else, it finds them cleared.
 - `JAVA_GC_THREADS=<n>` marks with `n` markers in all, and with more than one marks in parallel
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
 - `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,

@@ -719,6 +719,7 @@ fn start(h: &mut Heap) {
         h.every = n.max(1);
         h.next_collection = h.every;
     }
+    START_DELAY.store(number_from(c"JAVA_GC_START_DELAY").unwrap_or(0), Ordering::Relaxed);
     if number_from(c"JAVA_GC_GENERATIONS") == Some(1) {
         track_writes(h);
     }
@@ -1273,6 +1274,10 @@ fn starting(argument: *mut u8) -> usize {
     NO_STARTING
 }
 
+/// The milliseconds a starting thread waits before it registers, for testing the collector
+/// (`JAVA_GC_START_DELAY`): collections then run while threads start.
+static START_DELAY: AtomicUsize = AtomicUsize::new(0);
+
 /// Ends what `starting` began, once the thread is registered (or was not started).
 fn started(entry: usize) {
     match entry {
@@ -1433,6 +1438,10 @@ fn real_pthread_create() -> Create {
 extern "C" fn begin(start: *mut u8) -> *mut u8 {
     let Start { routine, argument, entry } = unsafe { (start as *mut Start).read() };
     unsafe { System.dealloc(start, Layout::new::<Start>()) };
+    let delay = START_DELAY.load(Ordering::Relaxed);
+    if delay > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(delay as u64));
+    }
     let _ = LISTS.try_with(|lists| {
         let g = lock();
         if lists.entry.get() == NO_ENTRY {
@@ -3678,9 +3687,8 @@ fn merge_runs(h: &mut Heap) {
 }
 
 /// Runs a collection now, for tests (`System.gc()` does nothing, see `system::gc`). A collection
-/// waits while a thread is starting (`collect`), which with tests run side by side is often, as
-/// the test harness starts a thread for each: so this tries again, the lock released for the
-/// thread to register, until one ran.
+/// waits while a thread that found no entry of `STARTING` is starting (`collect`): so this tries
+/// again, the lock released for the thread to register, until one ran.
 pub fn collect_now() {
     loop {
         let g = lock();
