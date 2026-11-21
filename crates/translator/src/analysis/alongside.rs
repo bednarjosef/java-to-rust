@@ -11,7 +11,7 @@ use std::thread::{Scope, ScopedJoinHandle};
 
 /// The stack of each such thread: as large as that of the translator's own (`main.rs`), as the
 /// analyses recurse over the code.
-const STACK: usize = 1 << 30;
+pub(super) const STACK: usize = 1 << 30;
 
 /// A step running alongside the others, or done already when they run one after another
 /// (`one_after_another`).

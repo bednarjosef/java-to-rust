@@ -30,7 +30,11 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     let mut nullable_group_returns: FastSet<usize> = FastSet::default();
     let narrowed = assigned_fields::narrowed_stores(class);
     let quiet_superclasses = assigned_fields::quiet_superclasses(class);
+    // The rounds, and the time of their walks of the code and the fields, and of the rest.
+    let (mut rounds, mut walks, mut rest) = (0, std::time::Duration::ZERO, std::time::Duration::ZERO);
     loop {
+        rounds += 1;
+        let start = std::time::Instant::now();
         let before = (
             facts.nullable_vars.len(),
             facts.nullable_returns.len(),
@@ -40,191 +44,50 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             facts.placeholder_statics.len(),
             facts.nullable_elements.len(),
         );
-        let mut elements = Vec::new();
-        let mut vars = Vec::new();
-        let mut params = Vec::new();
-        let mut declared = Vec::new();
-        let mut returns = Vec::new();
-        let mut fields = Vec::new();
-        let mut assigned = Vec::new();
-        let mut statics = Vec::new();
-        let mut placeholders = Vec::new();
-        let mut on_expr = |m: usize, e: &Expr| {
-            visit_expr(e, &mut |x| match &x.kind {
-                ExprKind::Assign { op: None, target, value }
-                    if nullable_type(x.ty) && maybe_null(facts, m, value) =>
-                {
-                    match target {
-                        Place::Var(name) => vars.push((m, name.clone())),
-                        Place::Field { object, name } => {
-                            if let Some(owner) = class.field_owner_name(object.ty, name) {
-                                // A variable that a null test proves not null here is an
-                                // `Option` all the same, which the field's cell holds.
-                                match narrowed.contains(&x.id) {
-                                    true => assigned.push((owner.to_string(), name.clone())),
-                                    false => fields.push((owner.to_string(), name.clone())),
-                                }
-                            }
-                        }
-                        Place::Static { class, name } => statics.push((*class, name.clone())),
-                        Place::Index(array, _) => elements.push(array.ty.element()),
-                    }
-                }
-                // `new T[n]` leaves its strings and objects null, and `new T[n][]` its
-                // arrays.
-                ExprKind::NewArray(sizes) => {
-                    let elem = x.ty.element_at(sizes.len());
-                    if nullable_type(elem) {
-                        elements.push(elem);
-                    }
-                }
-                // `Arrays.copyOf` and `copyOfRange` pad a longer copy with null.
-                ExprKind::Builtin(Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange), _)
-                    if x.ty.element().is_reference() =>
-                {
-                    elements.push(x.ty.element());
-                }
-                // A copy of an array between `String[]` and `Object[]` has the same nulls.
-                ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args)
-                    if facts.nullable_elements.contains(&args[0].ty.element()) =>
-                {
-                    elements.push(x.ty.element());
-                }
-                // A copy of `System.arraycopy` stores the source's nulls in the destination.
-                ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) if matches!((args[0].ty, args[2].ty), (Type::Array(s), Type::Array(_)) if facts.nullable_elements.contains(s)) =>
-                {
-                    elements.push(args[2].ty.element());
-                }
-                // An atomic update of an element compares the element with its expected value.
-                ExprKind::Builtin(Builtin::ElementUpdate(_), args)
-                    if args.len() == 2 && maybe_null(facts, m, &args[0]) =>
-                {
-                    elements.push(updated_element(x));
-                }
-                // A box in an array of primitives is unboxed (`analysis::unboxing`), so the
-                // array holds no null.
-                ExprKind::ArrayLit(items)
-                    if nullable_type(x.ty.element())
-                        && items.iter().any(|item| maybe_null(facts, m, item)) =>
-                {
-                    elements.push(x.ty.element());
-                }
-                // `Array.newArray` makes an array of any of the array classes that are `Object`s,
-                // with null references, and `Array.set` may store null in any of them.
-                ExprKind::Builtin(Builtin::Native(Native::ReflectNewArray), _) => {
-                    elements.extend(reflect_elements(class));
-                }
-                ExprKind::Builtin(Builtin::Native(Native::ReflectArraySet), args)
-                    if maybe_null(facts, m, &args[2]) =>
-                {
-                    elements.extend(reflect_elements(class));
-                }
-                // `Arrays.fill` stores its value in every element of the range.
-                ExprKind::Builtin(Builtin::ArraysFill | Builtin::Arrays(ArraysOp::FillRange), args)
-                    if args.last().is_some_and(|v| maybe_null(facts, m, v)) =>
-                {
-                    elements.push(args[0].ty.element());
-                }
-                ExprKind::Call { args, resolved: Some(callee), .. }
-                | ExprKind::MethodCall { args, resolved: Some(callee), .. }
-                | ExprKind::New { args, ctor: Some(callee), .. }
-                | ExprKind::ThisCall { args, resolved: Some(callee) }
-                | ExprKind::SuperInit { args, resolved: Some(callee) } => {
-                    // The argument reaches every method the call may run.
-                    for (i, arg) in args.iter().enumerate() {
-                        if maybe_null(facts, m, arg) {
-                            params.push((*callee, i));
-                        }
-                    }
-                }
-                _ => {}
-            })
-        };
-        for (m, method) in class.methods.iter().enumerate() {
-            for stmt in &method.body {
-                let mut on_stmt = |s: &Stmt| match s {
-                    Stmt::Local { ty, name, init: Some(init), .. }
-                        if nullable_type(*ty)
-                            && (maybe_null(facts, m, init)
-                                || matches!(init.kind, ExprKind::Static { .. })
-                                    && !read[m].contains(name)) =>
-                    {
-                        // A local that nothing reads, set from a static, initializes the static's
-                        // class (`MemorySegment segment = MemorySegment.NULL;` in the JDK), which
-                        // may be under way, with the static still null.
-                        declared.push((m, name.clone()));
-                    }
-                    Stmt::Return(Some(value), _)
-                        if maybe_null(facts, m, value) && !never_null_result(class, m) =>
-                    {
-                        returns.push(m)
-                    }
-                    Stmt::ForEach { name, array, .. }
-                        if facts.nullable_elements.contains(&array.ty.element()) =>
-                    {
-                        declared.push((m, name.clone()));
-                    }
-                    _ => {}
-                };
-                visit_stmt(stmt, &mut |e| on_expr(m, e), &mut on_stmt);
-            }
-        }
+        let mut found = methods(class, facts, &narrowed, &read);
         // Field initializers run in every object's constructor: a `new String[2]` there leaves
         // its strings null too.
         for f in class.types.iter().flat_map(|t| t.fields.iter().chain(&t.statics)) {
             if let Some(init) = &f.init {
-                on_expr(usize::MAX, init);
+                expression(class, facts, &narrowed, usize::MAX, init, &mut found);
             }
         }
-        for (t, decl) in class.types.iter().enumerate() {
-            for (i, f) in decl.fields.iter().enumerate() {
-                let key = (decl.name.clone(), f.name.clone());
-                // The collector clears a reference's referent, outside the program's code.
-                if decl.name == "java.lang.ref.Reference" && f.name == "referent" {
-                    fields.push(key);
-                    continue;
+        let (more, placeholders) = in_runs(
+            class.types.len(),
+            |run| {
+                let mut found = (Found::default(), Vec::new());
+                for t in run {
+                    fields(
+                        class,
+                        facts,
+                        &ctors[t],
+                        t,
+                        &narrowed,
+                        &quiet_superclasses,
+                        &mut found.0,
+                        &mut found.1,
+                    );
                 }
-                if !(may_be_unset(f.ty) || starts_null_enum(facts, f))
-                    || set_by_construction(class, facts, &ctors[t], t, &f.name)
-                {
-                    continue;
-                }
-                // Facts only grow: a field found nullable stays so.
-                if facts.nullable_fields.contains(&key) {
-                    continue;
-                }
-                match assigned_fields::assigned_before_read(
-                    class,
-                    facts,
-                    &ctors[t],
-                    t,
-                    i,
-                    &narrowed,
-                    &quiet_superclasses,
-                ) {
-                    true => assigned.push(key),
-                    false => fields.push(key),
-                }
-            }
-            for f in decl.statics.iter().filter(|f| may_be_unset(f.ty) || matches!(f.ty, Type::Enum(_))) {
-                // An eagerly initialized static starts at a placeholder, which an object has not,
-                // so its cell starts empty; once the class is initialized, it holds the value.
-                if !f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e)) {
-                    statics.push((t, f.name.clone()));
-                } else if facts.eager_init.contains(&t) && matches!(f.ty, Type::Class(..)) {
-                    placeholders.push((t, f.name.clone()));
-                }
-            }
-        }
+                found
+            },
+            |all, (found, placeholders)| {
+                all.0.append(found);
+                all.1.extend(placeholders);
+            },
+        );
+        found.append(more);
+        let walked = std::time::Instant::now();
+        walks += walked - start;
         // A parameter that its method sets to a value that may be null (`moment =
         // moment.plus(days)`) is an `Option`, in every method of its group as below.
-        for (m, name) in &vars {
+        for (m, name) in &found.vars {
             if let Some(i) =
                 class.methods.get(*m).and_then(|method| method.params.iter().position(|p| &p.name == name))
             {
-                params.push((*m, i));
+                found.params.push((*m, i));
             }
         }
+        let Found { elements, vars, params, declared, returns, fields, assigned, statics } = found;
         facts.nullable_vars.extend(vars);
         facts.nullable_vars.extend(declared);
         // The methods of an override group share their parameters' and return value's nullness,
@@ -256,9 +119,17 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
             facts.placeholder_statics.len(),
             facts.nullable_elements.len(),
         );
+        rest += walked.elapsed();
         if before == after {
             break;
         }
+    }
+    if crate::timings::enabled() {
+        eprintln!(
+            "timing: nullness: {rounds} walks of the code and fields in {:.3} s, the rest {:.3} s",
+            walks.as_secs_f64(),
+            rest.as_secs_f64()
+        );
     }
     // A static that the program may set to null holds null like any other, whatever its
     // initializer: its cell is an `Option` that is read as it is.
@@ -267,6 +138,282 @@ pub fn analyze(class: &Class, facts: &mut Facts) {
     // A field that may be set to null is an `Option` read as one.
     let nullable = &facts.nullable_fields;
     facts.assigned_fields.retain(|key| !nullable.contains(key));
+}
+
+/// What a walk of the program's code finds that may be null, in the order it finds it, before
+/// the round adds it to the facts.
+#[derive(Default)]
+struct Found {
+    elements: Vec<Type>,
+    vars: Vec<(usize, String)>,
+    params: Vec<(usize, usize)>,
+    declared: Vec<(usize, String)>,
+    returns: Vec<usize>,
+    fields: Vec<(String, String)>,
+    assigned: Vec<(String, String)>,
+    statics: Vec<(usize, String)>,
+}
+
+impl Found {
+    fn append(&mut self, mut other: Found) {
+        self.elements.append(&mut other.elements);
+        self.vars.append(&mut other.vars);
+        self.params.append(&mut other.params);
+        self.declared.append(&mut other.declared);
+        self.returns.append(&mut other.returns);
+        self.fields.append(&mut other.fields);
+        self.assigned.append(&mut other.assigned);
+        self.statics.append(&mut other.statics);
+    }
+}
+
+/// The fewest methods or classes in a run of a walk that one thread takes (`in_runs`).
+const RUN: usize = 1024;
+
+/// What the code of every method finds that may be null, given `facts`, which the walk only
+/// reads.
+fn methods(class: &Class, facts: &Facts, narrowed: &FastSet<ExprId>, read: &[FastSet<String>]) -> Found {
+    in_runs(
+        class.methods.len(),
+        |run| {
+            let mut found = Found::default();
+            for m in run {
+                method(class, facts, narrowed, &read[m], m, &mut found);
+            }
+            found
+        },
+        Found::append,
+    )
+}
+
+/// `walk` of the indexes `0..n`, in runs on several threads where there are many, joined in
+/// their order: what one walk of them in order finds, in the same order.
+fn in_runs<T: Send + Default>(
+    n: usize,
+    walk: impl Fn(std::ops::Range<usize>) -> T + Sync,
+    join: impl Fn(&mut T, T),
+) -> T {
+    let threads = std::thread::available_parallelism().map_or(1, |t| t.get()).clamp(1, 8);
+    let size = n.div_ceil(threads * 16).max(RUN);
+    let runs: Vec<std::ops::Range<usize>> = (0..n).step_by(size).map(|at| at..(at + size).min(n)).collect();
+    if threads == 1 || runs.len() < 2 {
+        return walk(0..n);
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let done: Vec<Vec<(usize, T)>> = std::thread::scope(|scope| {
+        let walkers: Vec<_> = (0..threads.min(runs.len()))
+            .map(|_| {
+                let walker = || {
+                    let mut out = Vec::new();
+                    loop {
+                        let r = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(run) = runs.get(r) else { break };
+                        out.push((r, walk(run.clone())));
+                    }
+                    out
+                };
+                let thread = std::thread::Builder::new()
+                    .name("nullness".to_string())
+                    .stack_size(super::alongside::STACK);
+                thread.spawn_scoped(scope, walker).expect("a thread for nullness")
+            })
+            .collect();
+        walkers
+            .into_iter()
+            .map(|w| w.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+            .collect()
+    });
+    let mut by_run: Vec<Option<T>> = (0..runs.len()).map(|_| None).collect();
+    for (r, found) in done.into_iter().flatten() {
+        by_run[r] = Some(found);
+    }
+    let mut all = T::default();
+    for run in by_run {
+        join(&mut all, run.expect("every run is walked"));
+    }
+    all
+}
+
+/// What the fields and statics of class `t`, whose constructors are `ctors`, find that may be
+/// null.
+#[allow(clippy::too_many_arguments)]
+fn fields(
+    class: &Class,
+    facts: &Facts,
+    ctors: &[usize],
+    t: usize,
+    narrowed: &FastSet<ExprId>,
+    quiet_superclasses: &[bool],
+    found: &mut Found,
+    placeholders: &mut Vec<(usize, String)>,
+) {
+    let decl = &class.types[t];
+    for (i, f) in decl.fields.iter().enumerate() {
+        let key = (decl.name.clone(), f.name.clone());
+        // The collector clears a reference's referent, outside the program's code.
+        if decl.name == "java.lang.ref.Reference" && f.name == "referent" {
+            found.fields.push(key);
+            continue;
+        }
+        if !(may_be_unset(f.ty) || starts_null_enum(facts, f))
+            || set_by_construction(class, facts, ctors, t, &f.name)
+        {
+            continue;
+        }
+        // Facts only grow: a field found nullable stays so.
+        if facts.nullable_fields.contains(&key) {
+            continue;
+        }
+        match assigned_fields::assigned_before_read(class, facts, ctors, t, i, narrowed, quiet_superclasses) {
+            true => found.assigned.push(key),
+            false => found.fields.push(key),
+        }
+    }
+    for f in decl.statics.iter().filter(|f| may_be_unset(f.ty) || matches!(f.ty, Type::Enum(_))) {
+        // An eagerly initialized static starts at a placeholder, which an object has not,
+        // so its cell starts empty; once the class is initialized, it holds the value.
+        if !f.init.as_ref().is_some_and(|e| !maybe_null(facts, usize::MAX, e)) {
+            found.statics.push((t, f.name.clone()));
+        } else if facts.eager_init.contains(&t) && matches!(f.ty, Type::Class(..)) {
+            placeholders.push((t, f.name.clone()));
+        }
+    }
+}
+
+/// What method `m`, whose code reads the locals `read`, finds that may be null.
+fn method(
+    class: &Class,
+    facts: &Facts,
+    narrowed: &FastSet<ExprId>,
+    read: &FastSet<String>,
+    m: usize,
+    found: &mut Found,
+) {
+    let (mut declared, mut returns) = (Vec::new(), Vec::new());
+    for stmt in &class.methods[m].body {
+        let mut on_stmt = |s: &Stmt| match s {
+            Stmt::Local { ty, name, init: Some(init), .. }
+                if nullable_type(*ty)
+                    && (maybe_null(facts, m, init)
+                        || matches!(init.kind, ExprKind::Static { .. }) && !read.contains(name)) =>
+            {
+                // A local that nothing reads, set from a static, initializes the static's
+                // class (`MemorySegment segment = MemorySegment.NULL;` in the JDK), which
+                // may be under way, with the static still null.
+                declared.push((m, name.clone()));
+            }
+            Stmt::Return(Some(value), _) if maybe_null(facts, m, value) && !never_null_result(class, m) => {
+                returns.push(m)
+            }
+            Stmt::ForEach { name, array, .. } if facts.nullable_elements.contains(&array.ty.element()) => {
+                declared.push((m, name.clone()));
+            }
+            _ => {}
+        };
+        visit_stmt(stmt, &mut |e| expression(class, facts, narrowed, m, e, found), &mut on_stmt);
+    }
+    found.declared.append(&mut declared);
+    found.returns.append(&mut returns);
+}
+
+/// What expression `e` of method `m` (`usize::MAX` outside the methods) stores that may be null,
+/// and the parameters it may pass null to.
+fn expression(
+    class: &Class,
+    facts: &Facts,
+    narrowed: &FastSet<ExprId>,
+    m: usize,
+    e: &Expr,
+    found: &mut Found,
+) {
+    visit_expr(e, &mut |x| match &x.kind {
+        ExprKind::Assign { op: None, target, value }
+            if nullable_type(x.ty) && maybe_null(facts, m, value) =>
+        {
+            match target {
+                Place::Var(name) => found.vars.push((m, name.clone())),
+                Place::Field { object, name } => {
+                    if let Some(owner) = class.field_owner_name(object.ty, name) {
+                        // A variable that a null test proves not null here is an
+                        // `Option` all the same, which the field's cell holds.
+                        match narrowed.contains(&x.id) {
+                            true => found.assigned.push((owner.to_string(), name.clone())),
+                            false => found.fields.push((owner.to_string(), name.clone())),
+                        }
+                    }
+                }
+                Place::Static { class, name } => found.statics.push((*class, name.clone())),
+                Place::Index(array, _) => found.elements.push(array.ty.element()),
+            }
+        }
+        // `new T[n]` leaves its strings and objects null, and `new T[n][]` its
+        // arrays.
+        ExprKind::NewArray(sizes) => {
+            let elem = x.ty.element_at(sizes.len());
+            if nullable_type(elem) {
+                found.elements.push(elem);
+            }
+        }
+        // `Arrays.copyOf` and `copyOfRange` pad a longer copy with null.
+        ExprKind::Builtin(Builtin::ArraysCopyOf | Builtin::Arrays(ArraysOp::CopyOfRange), _)
+            if x.ty.element().is_reference() =>
+        {
+            found.elements.push(x.ty.element());
+        }
+        // A copy of an array between `String[]` and `Object[]` has the same nulls.
+        ExprKind::Builtin(Builtin::StringArrayOf | Builtin::ObjectArrayOf, args)
+            if facts.nullable_elements.contains(&args[0].ty.element()) =>
+        {
+            found.elements.push(x.ty.element());
+        }
+        // A copy of `System.arraycopy` stores the source's nulls in the destination.
+        ExprKind::Builtin(Builtin::Native(Native::ArrayCopy), args) if matches!((args[0].ty, args[2].ty), (Type::Array(s), Type::Array(_)) if facts.nullable_elements.contains(s)) =>
+        {
+            found.elements.push(args[2].ty.element());
+        }
+        // An atomic update of an element compares the element with its expected value.
+        ExprKind::Builtin(Builtin::ElementUpdate(_), args)
+            if args.len() == 2 && maybe_null(facts, m, &args[0]) =>
+        {
+            found.elements.push(updated_element(x));
+        }
+        // A box in an array of primitives is unboxed (`analysis::unboxing`), so the
+        // array holds no null.
+        ExprKind::ArrayLit(items)
+            if nullable_type(x.ty.element()) && items.iter().any(|item| maybe_null(facts, m, item)) =>
+        {
+            found.elements.push(x.ty.element());
+        }
+        // `Array.newArray` makes an array of any of the array classes that are `Object`s,
+        // with null references, and `Array.set` may store null in any of them.
+        ExprKind::Builtin(Builtin::Native(Native::ReflectNewArray), _) => {
+            found.elements.extend(reflect_elements(class));
+        }
+        ExprKind::Builtin(Builtin::Native(Native::ReflectArraySet), args)
+            if maybe_null(facts, m, &args[2]) =>
+        {
+            found.elements.extend(reflect_elements(class));
+        }
+        // `Arrays.fill` stores its value in every element of the range.
+        ExprKind::Builtin(Builtin::ArraysFill | Builtin::Arrays(ArraysOp::FillRange), args)
+            if args.last().is_some_and(|v| maybe_null(facts, m, v)) =>
+        {
+            found.elements.push(args[0].ty.element());
+        }
+        ExprKind::Call { args, resolved: Some(callee), .. }
+        | ExprKind::MethodCall { args, resolved: Some(callee), .. }
+        | ExprKind::New { args, ctor: Some(callee), .. }
+        | ExprKind::ThisCall { args, resolved: Some(callee) }
+        | ExprKind::SuperInit { args, resolved: Some(callee) } => {
+            // The argument reaches every method the call may run.
+            for (i, arg) in args.iter().enumerate() {
+                if maybe_null(facts, m, arg) {
+                    found.params.push((*callee, i));
+                }
+            }
+        }
+        _ => {}
+    });
 }
 
 /// The element types of references of the array classes that are `Object`s, which

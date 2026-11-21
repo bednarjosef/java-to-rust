@@ -832,9 +832,9 @@ about 390 s (ranges 16 s, early reads 11 s, nullness 18 s, borrowing 10 s, objec
 19 s, and the ASCII strings, untimed then). On javac's census from its checkpoint, a round of the
 analyses goes from 5.9 to 6.2 s to 4.4 to 4.8 s, and the peak memory from 0.50 to 0.51 or
 0.52 GB. That nullness waits for the statics alone, and the steps after it run on its thread
-rather than after the object values on the round's own, should take the Minecraft server's round
-from 87 s to about 66 s by the times of its steps (its object values take 29 s, nullness 19 s
-and the exceptions 18 s); this has not been measured yet. On javac, whose object values take 2.5
+rather than after the object values on the round's own, took the Minecraft server's analyses
+from 91.7 s to 70.1 s (its object values take 28.8 s, nullness 19.4 s and the exceptions 17.6 s,
+so nullness and the steps after it are the longest chain). On javac, whose object values take 2.5
 to 3 s against the 5 s of nullness and the steps after it, a round gains under a second, which
 does not show on a loaded machine: from its checkpoint, the two rounds took 7.2 to 8.6 s and 6.3
 to 7.3 s before and 7.2 to 9.6 s and 5.9 to 11.7 s after, at a load of 17 to 23 on 16 cores,
@@ -842,6 +842,16 @@ with the same peak memory (0.90 to 0.93 GB) and about a tenth more CPU time.
 `a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another`
 (`tests/translation.rs`) compares a census of five rounds, the generator's among them, with the
 steps run alongside each other and one after another.
+
+**Nullness on several threads.** Nullness (`analysis/nullness.rs`) walks the program's code and
+its classes' fields again and again until a walk finds nothing new (20 times on javac). A walk
+only reads the facts, and what it finds is added to them after it, so each walk is cut into runs
+of at least 1,024 methods or classes, walked on up to eight threads (`in_runs`), and the runs'
+findings are joined in their order: what one walk in order finds, in the same order, so the
+facts and the crate are the same. On javac's census from its checkpoint, with the Minecraft
+server's build running beside it, nullness takes 0.88 and 0.54 s in its two rounds instead of 2.0
+and 1.4 s, with the same crate and report. `timing: nullness:` gives the number of walks and
+their time.
 
 **Generator rounds that write only what is new.** The enums of class types get the items the
 code asks for (conversions, dispatch, bodies of methods), which only writing the code finds, so
