@@ -807,25 +807,38 @@ million (0.17 s instead of 3.9 s).
 
 **Steps of the analyses alongside each other.** Every check reads facts that the steps before
 it find, so none can move ahead of another; what a round can do is find its facts sooner. The
-steps that read none of each other's
-facts run at once, on threads of their own (`analysis/alongside.rs`): from the start of a round,
-alongside the representation and the checks, the ranges, fixed fields, statics and early reads,
-which read the code and the ranges alone, the ASCII strings on a thread of their own from when the
-ranges are found (nothing reads them before the generator, and on the thread of the early reads
-they held up nullness, which waits for those, by 12 s on the Minecraft server), and the objects on
-the stack, which the census takes once the messages of `NullPointerException`s pass; once the representation and the
-pattern variables are checked, nullness and then the borrowed parameters, alongside the object
-values and the checks after them. Each step's result is taken where the step ran before, so a
-round finds the same facts and stops at the same error or panic (a panic carries its place in
-the translator to the thread that takes it), and the result of a step that a check before it
-ends the round without is dropped. The type hierarchy keeps its answers behind locks, and the
-translator allocates with mimalloc, whose threads neither wait for each other nor keep memory the
-others could reuse (see "Generator threads"). A round that a check ends gains nothing; one that gets
-past the checks no longer waits for these steps, which on the Minecraft server took about 75 s
-of each such round of about 390 s (ranges 16 s, early reads 11 s, nullness 18 s, borrowing
-10 s, objects on the stack 19 s, and the ASCII strings, untimed then). On javac's census from
-its checkpoint, a round of the analyses goes from 5.9 to 6.2 s to 4.4 to 4.8 s, and the peak
-memory from 0.50 to 0.51 or 0.52 GB.
+steps that read none of each other's facts run at once, on threads of their own
+(`analysis/alongside.rs`). From the start of a round, alongside the representation and the
+checks: the ranges, with the ASCII strings on a thread of their own from when the ranges are
+found (nothing reads them before the generator, and on the thread of the early reads they held
+up nullness, which waits for those, by 12 s on the Minecraft server); the fixed fields, statics,
+early reads and proven classes, which read the code alone; and the objects on the stack, which
+the census takes once the messages of `NullPointerException`s pass. Once the representation and
+the pattern variables are checked, alongside the object values and the checks after them:
+nullness, which waits for the statics but not for the ranges, which it does not read; then the
+borrowed parameters and the lent closures, on a thread of their own; and the frozen fields,
+arrays, indexing, moves and exceptions, which read none of the facts that the round's own thread
+finds meanwhile (the identity checks of the object values, the boxes compared by identity, the
+classes whose monitors are kept), nor the borrowed parameters, the lent closures or the ASCII
+strings. Each step's result is taken where
+the step ran before, so a round finds the same facts and stops at the same error or panic (a
+panic carries its place in the translator to the thread that takes it), and the result of a step
+that a check before it ends the round without is dropped. The type hierarchy keeps its answers
+behind locks, and the translator allocates with mimalloc, whose threads neither wait for each
+other nor keep memory the others could reuse (see "Generator threads"). A round that a check
+ends gains nothing, as it waits for the steps alongside to end; one that gets past the checks no
+longer waits for these steps, which on the Minecraft server took about 75 s of each such round of
+about 390 s (ranges 16 s, early reads 11 s, nullness 18 s, borrowing 10 s, objects on the stack
+19 s, and the ASCII strings, untimed then). On javac's census from its checkpoint, a round of the
+analyses goes from 5.9 to 6.2 s to 4.4 to 4.8 s, and the peak memory from 0.50 to 0.51 or
+0.52 GB. That nullness waits for the statics alone, and the steps after it run on its thread
+rather than after the object values on the round's own, should take the Minecraft server's round
+from 87 s to about 66 s by the times of its steps (its object values take 29 s, nullness 19 s
+and the exceptions 18 s); this has not been measured yet. On javac, whose object values take 2.5
+to 3 s against the 5 s of nullness and the steps after it, a round gains under a second, which
+does not show on a loaded machine: from its checkpoint, the two rounds took 7.2 to 8.6 s and 6.3
+to 7.3 s before and 7.2 to 9.6 s and 5.9 to 11.7 s after, at a load of 17 to 23 on 16 cores,
+with the same peak memory (0.90 to 0.93 GB) and about a tenth more CPU time.
 `a_census_finds_the_same_with_the_steps_of_the_analyses_one_after_another`
 (`tests/translation.rs`) compares a census of five rounds, the generator's among them, with the
 steps run alongside each other and one after another.
