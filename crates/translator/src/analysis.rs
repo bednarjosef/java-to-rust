@@ -350,6 +350,14 @@ impl Facts {
         std::iter::once(t).chain(class.hierarchy.ancestors(t)).find(|c| self.eager_init.contains(c))
     }
 
+    /// Whether eager class `t` is initialized before any code that uses it runs: `main` runs its
+    /// static initialization first (`statics::early`), and the only code that runs before is
+    /// that of the other such classes, which names none of its statics but constants, nor any
+    /// of its methods, and of its enum constants only the values, which need no initialization.
+    pub fn initialized_first(&self, t: usize) -> bool {
+        self.early_init.contains(&t)
+    }
+
     /// Whether a read of the field `name` of an object of type `ty` can give null.
     pub fn field_nullable(&self, ty: Type, name: &str) -> bool {
         self.field_key(ty, name).is_some_and(|key| self.nullable_fields.contains(&key))
@@ -567,7 +575,7 @@ fn analyze_with(
                     let (eager, finals) = statics::eager_and_final(class);
                     let early = if threaded { statics::early(class, &eager) } else { FastSet::default() };
                     let frozen = statics::frozen(class, &finals);
-                    let entry = statics::entry_inits(class, &eager);
+                    let entry = statics::entry_inits(class, &eager, &early);
                     (eager, early, finals, frozen, entry)
                 });
             let ascii_chars = ranges.ascii_chars.clone();
