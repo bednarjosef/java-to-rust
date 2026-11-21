@@ -538,7 +538,11 @@ All 28 targets and the 3 whole-program corpus programs took 20 to 37 s each befo
 (`ScannerGrades`, `TextAdventure`: 630 units, 14 s, 1.2 GB + 2.3 GB) and `StreamPipeline` (161
 units, 6.6 s, 0.35 GB + 1.9 GB). Each reachability round completes the records of copies of
 only the units that this changes (those with a record or without a package), which halved the
-translator's peak for those three. With the debug translator, which `run.sh` uses, the first
+translator's peak for those three. The load then hands lowering each such unit's last completed
+copy rather than completing the unit again, except where a unit that came later declared the
+class of a record's component, which changes how `hashCode` and `equals` hash and compare it but
+no member, so the rounds made no copy for it: those few units are completed again (18 of the
+server's). With the debug translator, which `run.sh` uses, the first
 three of the table took 36, 41 and 40 s before and 4.8, 4.2 and 5.3 s after. Most of what
 remains for a small program is the JVM and javac starting and attributing the program's own
 file (2.4 s and 0.9 GB for `CheckedExceptions`, which uses no library unit); for the large ones,

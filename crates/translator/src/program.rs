@@ -658,8 +658,10 @@ fn load_in_rounds(
     let mut transcript =
         Transcript { first: (new.len(), source.received), rounds: Vec::new(), raw: Vec::new() };
     javac += start.elapsed();
-    // The units as javac gave them, and the copies of those whose records were completed.
+    // The units as javac gave them, and the copies of those whose records were completed, with
+    // where in `completed` each unit's last copy is.
     let (given, completed) = (Store::default(), Store::default());
+    let (mut last_copy, mut copies_made) = (std::collections::HashMap::new(), 0);
     let mut records = javac::Records::default();
     // The tree that the rounds walk of each unit, and the units that completing their records
     // changes, by index, with their records and what completing them wrote.
@@ -702,7 +704,7 @@ fn load_in_rounds(
         let mut adds_only = true;
         for (index, unit, of, completed) in &mut changing {
             let now = records.completion(of);
-            if now != *completed {
+            if !now.same_members(completed) {
                 adds_only &= now.only_adds_to(completed);
                 changed.push((*index, complete(unit)));
                 *completed = now;
@@ -723,6 +725,8 @@ fn load_in_rounds(
         let (indices, copies): (Vec<usize>, Vec<Value>) = changed.into_iter().unzip();
         for (index, copy) in indices.into_iter().zip(completed.push(copies)) {
             trees[index] = &copy["tree"];
+            last_copy.insert(index, copies_made);
+            copies_made += 1;
         }
         if restart {
             (for_records, stale) = (for_records + 1, stale + rounds.restarts());
@@ -802,11 +806,34 @@ fn load_in_rounds(
     reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
     reach.jdk_resources = reach::read_jdk_resources(&reach.jdk_resource_names());
     reach.added_exports = program.add_exports.clone();
-    let changing: Vec<usize> = changing.iter().map(|&(index, ..)| index).collect();
+    // Whether each unit's last copy is the unit completed now: whether what completing it writes
+    // is what it was when the copy was made. A copy is made again whenever the members change
+    // (`Completion::same_members`), and not when a component's class is declared by a later
+    // unit, which changes only how `hashCode` and `equals` hash and compare the component; the
+    // rounds keep the code they walked of those, and lowering gets the unit completed now.
+    let changing: Vec<(usize, bool)> = changing
+        .iter()
+        .map(|(index, _, of, completed)| (*index, records.completion(of) == *completed))
+        .collect();
     let mut units = given.into_values();
-    for index in changing {
-        transcript.raw.push((index, units[index].clone()));
-        records.complete(&mut units[index]);
+    let mut copies = completed.into_values();
+    for (index, current) in changing {
+        let copy = std::mem::take(&mut copies[last_copy[&index]]);
+        if !current {
+            transcript.raw.push((index, units[index].clone()));
+            records.complete(&mut units[index]);
+            continue;
+        }
+        let raw = std::mem::replace(&mut units[index], copy);
+        debug_assert!(
+            {
+                let mut again = raw.clone();
+                records.complete(&mut again);
+                again == units[index]
+            },
+            "the last completed copy of unit {index} is not the unit completed now"
+        );
+        transcript.raw.push((index, raw));
     }
     let file_name = |u: &Value| u["file"].as_str().map(|f| f.rsplit('/').next().unwrap_or(f).to_string());
     reach.unit_files = units.iter().map(|u| file_name(u).unwrap_or_default()).collect();

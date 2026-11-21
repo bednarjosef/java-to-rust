@@ -96,8 +96,10 @@ pub(super) fn completion(records: &[&Value], survey: &Survey) -> Completion {
         let hash_code = writes_hash_code(record, &name, survey);
         let equals = writes_equals(record, survey);
         let objects = components.iter().filter(|c| hashed_by_objects(&c.ty));
-        let plain = objects.filter(|_| hash_code || equals).map(|c| survey.plain_value(&c.ty)).collect();
-        RecordCompletion { accessors: accessors.collect(), hash_code, equals, plain }
+        let objects: Vec<&Component> = objects.filter(|_| hash_code || equals).collect();
+        let plain = objects.iter().map(|c| survey.plain_value(&c.ty)).collect();
+        let own = objects.iter().map(|c| survey.own_methods(&c.ty)).collect();
+        RecordCompletion { accessors: accessors.collect(), hash_code, equals, plain, own }
     };
     Completion(records.iter().map(|record| decide(record)).collect())
 }
@@ -107,6 +109,18 @@ pub(super) fn completion(records: &[&Value], survey: &Survey) -> Completion {
 pub struct Completion(Vec<RecordCompletion>);
 
 impl Completion {
+    /// Whether what `complete_record` writes with this completion has the members it wrote with
+    /// `other`, of the same records, with the same `implicit` marks: only how `hashCode` and
+    /// `equals` hash and compare components may differ, through their own types or through
+    /// `java.util.Objects`, as a component's class may be declared by a unit that comes later.
+    pub fn same_members(&self, other: &Completion) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(&other.0).all(|(a, b)| {
+                (&a.accessors, a.hash_code, a.equals, &a.plain)
+                    == (&b.accessors, b.hash_code, b.equals, &b.plain)
+            })
+    }
+
     /// Whether what `complete_record` writes with this completion only adds to what it wrote
     /// with `before`, of the same records: every member written before is written still, each
     /// accessor overriding at least what it did, so the new unit has the members of the old one
@@ -140,6 +154,9 @@ struct RecordCompletion {
     /// (`hashed_by_objects`) is a plain value (`Survey::plain_value`), which makes its calls
     /// implicit.
     plain: Vec<bool>,
+    /// And whether each is hashed and compared through its own type (`Survey::own_methods`),
+    /// which changes the code of `hashCode` and `equals` but no member.
+    own: Vec<bool>,
 }
 
 /// Whether `complete_unit` may change the compilation unit: it has no package, it declares a
@@ -870,7 +887,13 @@ mod tests {
             .into_iter()
             .map(|a| a.map(|o| o.into_iter().map(|i| (i.to_string(), "()int".to_string())).collect()))
             .collect();
-        Completion(vec![RecordCompletion { accessors, hash_code, equals, plain: Vec::new() }])
+        Completion(vec![RecordCompletion {
+            accessors,
+            hash_code,
+            equals,
+            plain: Vec::new(),
+            own: Vec::new(),
+        }])
     }
 
     #[test]
