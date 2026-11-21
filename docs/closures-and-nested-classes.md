@@ -448,17 +448,22 @@ borrowed string parameter, `-> Result<_, Throwable>` when the method throws).
 - **Stored form** (fields, statics, array elements, returns, and the parameters that are not
   lent): `Rc::new(closure) as IntOp`, so every place gets the alias's type without an
   annotation. Such a parameter is `&IntOp`, as the borrowing analysis lends objects.
-- **Lent form**: a parameter that the method only calls and passes on to other lent parameters
-  (never assigns, stores, captures in another lambda, returns or uses with a default method;
-  `Facts::lent_closures`) is `&dyn Fn(i32, i32) -> i32`, or `Option<&dyn Fn(..)>` where it may be
-  null, with no `Send + Sync` even for a closure type that threads share, since the closure runs
-  on the thread that lends it. The methods of an override group take it alike, so it is lent in
-  all of them or in none; a constructor's parameters and a lambda's own are never lent. A lambda
+- **Lent form**: a parameter that the method only calls, passes on to other lent parameters
+  and captures in lambdas passed to them that do the same with it (never assigns, stores,
+  captures in a stored lambda, returns or uses with a default method; `Facts::lent_closures`) is
+  `&dyn Fn(i32, i32) -> i32`, or `Option<&dyn Fn(..)>` where it may be null, with no
+  `Send + Sync` even for a closure type that threads share, since the closure runs on the
+  thread that lends it. The methods of an override group take it alike, so it is lent in all of
+  them or in none; a constructor's parameters and a lambda's own are never lent. A lambda
   passed to it is the closure itself, made on the caller's stack and lent,
   `each(n, &(|v: i32| { .. }))`, so evaluating it allocates nothing and drops no `Rc`; it
-  borrows its captures as a local closure does. A lent parameter or a local closure is passed as
-  it is, `null` as `None`, and a stored closure as a borrow of what its handle holds
-  (`&**(&op)`, `(&op).as_deref()`), so both forms meet at one call.
+  borrows its captures as a local closure does, a lent closure among them, `&dyn Fn` inside
+  `&dyn Fn` (`Facts::lent_captures`; only one that is never null), so a method that wraps the
+  closure it is lent into another one it lends on (the Minecraft server's index mergers that
+  swap the indexes of their consumer, its entity queries that wrap their consumer for each
+  section) keeps its parameter lent and its callers' lambdas on their stacks. A lent parameter
+  or a local closure is passed as it is, `null` as `None`, and a stored closure as a borrow of
+  what its handle holds (`&**(&op)`, `(&op).as_deref()`), so both forms meet at one call.
 - **Local form**: a local whose every declaration has a lambda as its initializer and that is
   only called and passed to lent parameters (never assigned, captured, otherwise passed,
   returned or used with a default method; `Facts::closure_locals`) is the closure itself,
@@ -619,10 +624,9 @@ constant whose enum implements `Iterable`.
 
 Plans, each a refinement of a correct form that exists:
 
-- **Lambdas that capture a lent parameter**: a lambda that captures a closure parameter (the
-  server's `getEntities` wraps its consumer in the lambda it passes on) makes that parameter a
-  stored one today. Where the capturing lambda is itself lent, it could borrow the lent
-  closure, `&dyn Fn` inside `&dyn Fn`, and the outer parameter stay lent.
+- **Lent closures captured through a local**: a lambda that captures a lent closure and is held
+  in a local closure (or an ordered call's temporary) before it is lent makes that closure a
+  stored one; only a lambda written as the argument itself borrows it.
 - **Parameter form `impl Fn(A) -> R`**: a lent parameter as a generic, so that the helper is
   instantiated per lambda and LLVM can inline the closure's body into the helper's loop. A
   method that wraps its function parameter into a new lambda and recurses would instantiate
@@ -664,14 +668,14 @@ Plans, each a refinement of a correct form that exists:
 | `lower/constant_bodies.rs` | enum constant bodies |
 | `lower/foreach.rs` | for-each over `Iterable` |
 | `lower/hierarchy.rs` | `o.super(..)` and `Outer.super.m()` |
-| `analysis/closures.rs` | which interfaces are closure types; lent closure parameters; closure locals |
+| `analysis/closures.rs` | which interfaces are closure types; lent closure parameters and the captures that hold them; closure locals |
 | `codegen/closures.rs` | aliases, closures, calls, extension traits, `Rc` or `Arc` |
 
 Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMemberClasses`,
 `InnerClasses`, `InnerClassTrees`, `InnerIterators`, `InnerSuperclassesWithExplicitOuters`,
 `AnonymousClasses`, `AnonymousSubclasses`, `ForEachIterable`, `IteratorRemove`, `LambdaObjects`,
 `LambdaMadeOnce`, `LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
-`ClosureForms`, `LocalClosures`, `ClosureDefaultMethods`, `GenericClosures`), and in
-`corpus/whole-program/` (`FunctionChains`, `Comparators`, `ReverseOrder`,
-`LambdasInConstantBodies`, `ConstantBodyFieldLambdas`, `LambdaPlaceObjects`, `LentClosures`),
-which run only with the JDK's sources.
+`ClosureForms`, `LocalClosures`, `LentClosureCaptures`, `ClosureDefaultMethods`,
+`GenericClosures`), and in `corpus/whole-program/` (`FunctionChains`, `Comparators`,
+`ReverseOrder`, `LambdasInConstantBodies`, `ConstantBodyFieldLambdas`, `LambdaPlaceObjects`,
+`LentClosures`), which run only with the JDK's sources.

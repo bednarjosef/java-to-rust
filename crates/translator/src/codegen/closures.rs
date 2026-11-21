@@ -15,7 +15,9 @@
 //! A parameter that the method only calls and lends on (`Facts::lent_closures`) is a
 //! `&dyn Fn(..)` instead, and a lambda passed to it is the closure itself on the caller's stack,
 //! `&(|x: i32| -> i32 { x + k })`, which borrows its captures as a local closure does: no `Rc`
-//! is made or dropped. A stored closure passed to it lends what its handle holds.
+//! is made or dropped. A capture that holds a lent closure (`Facts::lent_captures`) is the
+//! `&dyn Fn` itself, called and lent on as the parameter is. A stored closure passed to a lent
+//! parameter lends what its handle holds.
 //!
 //! In a program with threads, a closure type that a thread can reach (`Facts::thread_shared`)
 //! is `std::sync::Arc<dyn Fn(..) + Send + Sync>` instead, and its closures `std::sync::Arc::new(..)`:
@@ -145,6 +147,9 @@ impl<'a> Gen<'a> {
             }
             return some(format!("&{{ {} {closure} }}", prelude.join(" ")));
         }
+        if let Some(local) = self.lent_capture(inner) {
+            return some(local);
+        }
         match &inner.kind {
             ExprKind::Null => return "None".to_string(),
             ExprKind::Var(name) if self.lent_param(name) => {
@@ -178,6 +183,18 @@ impl<'a> Gen<'a> {
     /// Whether `name` is a lent closure parameter of the method being written.
     fn lent_param(&self, name: &str) -> bool {
         self.param_key(name).is_some_and(|key| self.facts.lent_closures.contains(&key))
+    }
+
+    /// The local that holds the lent closure `e` reads in a closure's body: a capture of the
+    /// lambda that holds one (`Facts::lent_captures`), `this.f`, which is never null.
+    fn lent_capture(&self, e: &Expr) -> Option<String> {
+        let ExprKind::Field { object, name } = &e.kind else { return None };
+        if !matches!(object.kind, ExprKind::This)
+            || !self.facts.lent_captures.contains(&(self.this_struct, name.clone()))
+        {
+            return None;
+        }
+        self.field_locals.get(name).cloned()
     }
 
     /// The default methods of closure type `t` (named `name`) that the program calls, as an
@@ -233,6 +250,8 @@ impl<'a> Gen<'a> {
         let callee = match &receiver.kind {
             // In a default method, the closure itself.
             ExprKind::This => self.this_name().to_string(),
+            // A capture that holds a lent closure is the `&dyn Fn` the closure borrows.
+            ExprKind::Field { .. } if let Some(local) = self.lent_capture(receiver) => local,
             ExprKind::Var(_) => self.object(receiver),
             ExprKind::Field { object, name }
                 if matches!(object.kind, ExprKind::This) && self.field_locals.contains_key(name) =>
@@ -356,6 +375,19 @@ impl<'a> Gen<'a> {
             }
         }
         let fields = captured_fields(&self.class.methods[ctor]);
+        // A capture that holds a lent closure is the `&dyn Fn` it was lent as: the creating
+        // method's lent parameter, or the capture of the closure being written that holds one.
+        for (k, field) in fields.iter().enumerate() {
+            if let Some(field) = field
+                && self.facts.lent_captures.contains(&(c, field.clone()))
+            {
+                let source = self.peel(&args[k]);
+                values[k] = match &source.kind {
+                    ExprKind::Var(name) => self.local(name),
+                    _ => self.lent_capture(source).expect("a lent capture holds a lent closure"),
+                };
+            }
+        }
         // The lambda's own method behind a bridge that converts the arguments and the result.
         let bridged = match closures::bridged_call(&self.class.methods[m]) {
             Some(ExprKind::MethodCall { resolved: Some(sub), args, .. })

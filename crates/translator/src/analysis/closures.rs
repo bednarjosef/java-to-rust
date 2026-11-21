@@ -185,37 +185,52 @@ pub fn closure_types(class: &Class) -> FastSet<usize> {
     candidates
 }
 
-/// The closure parameters, as (method, parameter) indexes among the borrowed object parameters
-/// (`borrowed`), that the method only calls and lends on: every use of one is a call of its
-/// type's method on it or an argument of another such parameter, through casts to the closure
-/// types it is one of. Nothing keeps such a closure past the call, so the parameter is a
-/// `&dyn Fn(..)` (an `Option` of one where it may be null) that the caller lends, and a lambda
-/// passed to it is a closure on the caller's stack, with no `Rc`. A closure that another
-/// closure captures or that anything stores is not lent; neither is a parameter of a
-/// constructor or of a lambda's own method, which is the closure's. The methods of an override
-/// group take a parameter alike, so it is lent in all of them or in none.
+/// The closure parameters, as (method, parameter) indexes, that the method only calls and lends
+/// on: every use of one is a call of its type's method on it, an argument of another such
+/// parameter, or a capture of a lambda passed to one whose method in turn only calls and lends
+/// that capture (`lent_captures`), through casts to the closure types it is one of. Nothing keeps
+/// such a closure past the call, so the parameter is a `&dyn Fn(..)` (an `Option` of one where it
+/// may be null) that the caller lends, and a lambda passed to it is a closure on the caller's
+/// stack, with no `Rc`. The candidates are the borrowed object parameters (`borrowed`, those
+/// that may be null in `optional`) and, since a capture makes the borrowing analysis count a
+/// parameter as kept, the closure parameters that are never null (`non_null`); only one that is
+/// never null is captured. A closure that anything stores, or that a stored closure captures, is
+/// not lent; neither is a parameter of a constructor or of a lambda's own method, which is the
+/// closure's. The methods of an override group take a parameter alike, so it is lent in all of
+/// them or in none.
 pub fn lent_closures(
     class: &Class,
     closure_types: &FastSet<usize>,
     borrowed: &FastSet<(usize, usize)>,
+    optional: &FastSet<(usize, usize)>,
+    non_null: &dyn Fn(usize, &str) -> bool,
 ) -> FastSet<(usize, usize)> {
     let closure_of = |ty: Type| class.class_index(ty).filter(|t| closure_types.contains(t));
-    let mut lent: FastSet<(usize, usize)> = (borrowed.iter().copied())
-        .filter(|&(m, i)| {
-            let method = &class.methods[m];
-            let c = method.class;
-            !method.is_ctor
-                && !closure_types.contains(&c)
-                && !matches!(class.types[c].origin, Origin::Lambda { .. })
-                && closure_of(method.params[i].ty).is_some()
-                && !assigns(&method.body, &method.params[i].name)
-        })
-        .collect();
+    let mut lent: FastSet<(usize, usize)> = FastSet::default();
+    for (m, method) in class.methods.iter().enumerate() {
+        let c = method.class;
+        if method.is_ctor
+            || closure_types.contains(&c)
+            || matches!(class.types[c].origin, Origin::Lambda { .. })
+        {
+            continue;
+        }
+        for (i, p) in method.params.iter().enumerate() {
+            if closure_of(p.ty).is_some()
+                && (borrowed.contains(&(m, i)) || non_null(m, &p.name))
+                && !assigns(&method.body, &p.name)
+            {
+                lent.insert((m, i));
+            }
+        }
+    }
     loop {
         let losing: Vec<(usize, usize)> = (lent.iter().copied())
             .filter(|&(m, i)| {
                 let method = &class.methods[m];
-                !only_called(class, closure_types, &method.body, &method.params[i].name, &lent)
+                let capturable = !optional.contains(&(m, i));
+                let read = Read::Var(&method.params[i].name);
+                !only_called(class, closure_types, &method.body, read, &lent, capturable)
             })
             .collect();
         for p in &losing {
@@ -226,6 +241,83 @@ pub fn lent_closures(
         }
     }
     lent
+}
+
+/// The captures, as (lambda class, field), that hold a lent closure (`lent_closures`): the lambda
+/// is passed to a lent parameter, so its closure is on the stack of the code that creates it, the
+/// value it captures is a lent parameter that is never null (`optional` holds those that may be)
+/// or such a capture of the lambda that creates it, and its methods only call the capture and
+/// lend it on. The closure then borrows the lent closure, `&dyn Fn` inside `&dyn Fn`, and the
+/// parameter it came from stays lent.
+pub fn lent_captures(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    lent: &FastSet<(usize, usize)>,
+    optional: &FastSet<(usize, usize)>,
+) -> FastSet<(usize, String)> {
+    let mut out: FastSet<(usize, String)> = FastSet::default();
+    // A lambda inside a lambda's method captures the outer one's capture: outer first.
+    loop {
+        let mut found = Vec::new();
+        for (m, method) in class.methods.iter().enumerate() {
+            let source = |e: &Expr| match &peel_closure_casts(e, closure_types, class).kind {
+                ExprKind::Var(v) => (method.params.iter().position(|p| p.name == *v))
+                    .is_some_and(|i| lent.contains(&(m, i)) && !optional.contains(&(m, i))),
+                ExprKind::Field { object, name } if matches!(object.kind, ExprKind::This) => {
+                    out.contains(&(method.class, name.clone()))
+                }
+                _ => false,
+            };
+            for s in &method.body {
+                visit_stmt(
+                    s,
+                    &mut |e| {
+                        visit_expr(e, &mut |x| {
+                            for (ctor, captures) in lent_lambdas(class, closure_types, x, lent) {
+                                let lambda = class.methods[ctor].class;
+                                for (k, capture) in captures.iter().enumerate() {
+                                    if source(capture)
+                                        && let Some(field) = capture_field(&class.methods[ctor], k)
+                                        && !out.contains(&(lambda, field.to_string()))
+                                        && field_lent(class, closure_types, lambda, field, lent)
+                                    {
+                                        found.push((lambda, field.to_string()));
+                                    }
+                                }
+                            }
+                        })
+                    },
+                    &mut |_| {},
+                );
+            }
+        }
+        if found.is_empty() {
+            break;
+        }
+        out.extend(found);
+    }
+    out
+}
+
+/// A closure variable: a local or parameter of the method, or a capture of the lambda whose
+/// method it is, `this.f`.
+#[derive(Clone, Copy)]
+enum Read<'n> {
+    Var(&'n str),
+    ThisField(&'n str),
+}
+
+impl Read<'_> {
+    /// Whether `e` reads the variable.
+    fn reads(self, e: &Expr) -> bool {
+        match (&e.kind, self) {
+            (ExprKind::Var(v), Read::Var(name)) => v == name,
+            (ExprKind::Field { object, name: f }, Read::ThisField(name)) => {
+                matches!(object.kind, ExprKind::This) && f == name
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Whether `stmts` assign the variable `name`, which a lent parameter, a borrow, cannot take.
@@ -245,14 +337,16 @@ fn assigns(stmts: &[Stmt], name: &str) -> bool {
     found
 }
 
-/// Whether every use of the closure variable `name` in `stmts` is a call of its type's method on
-/// it, or an argument of a parameter of `lent`.
+/// Whether every use of the closure variable `read` in `stmts` is a call of its type's method on
+/// it, an argument of a parameter of `lent`, or, where it may be captured (`capturable`), a
+/// capture of a lambda passed to such a parameter that only calls and lends it on.
 fn only_called(
     class: &Class,
     closure_types: &FastSet<usize>,
     stmts: &[Stmt],
-    name: &str,
+    read: Read,
     lent: &FastSet<(usize, usize)>,
+    capturable: bool,
 ) -> bool {
     let mut uses = Vec::new();
     let mut allowed = FastSet::default();
@@ -261,12 +355,10 @@ fn only_called(
             s,
             &mut |e| {
                 visit_expr(e, &mut |x| {
-                    if let ExprKind::Var(v) = &x.kind
-                        && v == name
-                    {
+                    if read.reads(x) {
                         uses.push(x.id);
                     }
-                    allowed.extend(called_or_lent(class, closure_types, x, name, lent));
+                    allowed.extend(called_or_lent(class, closure_types, x, read, lent, capturable));
                 })
             },
             &mut |_| {},
@@ -275,19 +367,20 @@ fn only_called(
     uses.iter().all(|id| allowed.contains(id))
 }
 
-/// The reads of the closure variable `name` that `x` calls the closure of, as its receiver, or
-/// passes as an argument of a parameter of `lent`.
+/// The reads of the closure variable `read` that `x` calls the closure of, as its receiver,
+/// passes as an argument of a parameter of `lent`, or, where `capturable`, captures in a lambda
+/// passed to such a parameter whose methods only call and lend that capture on.
 fn called_or_lent(
     class: &Class,
     closure_types: &FastSet<usize>,
     x: &Expr,
-    name: &str,
+    read: Read,
     lent: &FastSet<(usize, usize)>,
+    capturable: bool,
 ) -> Vec<ExprId> {
     let mut out = Vec::new();
     if let ExprKind::MethodCall { receiver, resolved: Some(r), .. } = &x.kind
-        && let ExprKind::Var(v) = &receiver.kind
-        && v == name
+        && read.reads(receiver)
         && let Some(t) = class.class_index(receiver.ty)
         && closure_types.contains(&t)
         && *r == closure_method(class, t)
@@ -299,22 +392,107 @@ fn called_or_lent(
     {
         for (j, a) in args.iter().enumerate() {
             if lent.contains(&(*callee, j)) {
-                out.extend(closure_read(a, name, closure_types, class));
+                out.extend(closure_read(a, read, closure_types, class));
+            }
+        }
+    }
+    if capturable {
+        for (ctor, captures) in lent_lambdas(class, closure_types, x, lent) {
+            let lambda = class.methods[ctor].class;
+            for (k, capture) in captures.iter().enumerate() {
+                if let Some(id) = closure_read(capture, read, closure_types, class)
+                    && let Some(field) = capture_field(&class.methods[ctor], k)
+                    && field_lent(class, closure_types, lambda, field, lent)
+                {
+                    out.push(id);
+                }
             }
         }
     }
     out
 }
 
-/// The `Var` node inside `e` when `e` reads the variable `name`, through casts to closure types.
-fn closure_read(e: &Expr, name: &str, closure_types: &FastSet<usize>, class: &Class) -> Option<ExprId> {
-    match &e.kind {
-        ExprKind::Var(v) if v == name => Some(e.id),
-        ExprKind::Cast(to, inner) if class.class_index(*to).is_some_and(|t| closure_types.contains(&t)) => {
-            closure_read(inner, name, closure_types, class)
+/// The lambdas that the call `x` passes to parameters of `lent`, as each one's constructor and
+/// the captures it is given: `Cast(closure type, New { lambda class })`, through casts between
+/// closure types, as the generator writes such a closure on the stack.
+fn lent_lambdas<'e>(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    x: &'e Expr,
+    lent: &FastSet<(usize, usize)>,
+) -> Vec<(usize, &'e [Expr])> {
+    let (ExprKind::Call { args, resolved: Some(callee), .. }
+    | ExprKind::MethodCall { args, resolved: Some(callee), .. }) = &x.kind
+    else {
+        return Vec::new();
+    };
+    let closure = |ty: Type| class.class_index(ty).is_some_and(|t| closure_types.contains(&t));
+    let mut out = Vec::new();
+    for (j, a) in args.iter().enumerate() {
+        if !lent.contains(&(*callee, j)) {
+            continue;
+        }
+        let mut e = a;
+        while let ExprKind::Cast(to, inner) = &e.kind
+            && closure(*to)
+        {
+            if let ExprKind::New { args: captures, ctor: Some(ctor), .. } = &inner.kind
+                && matches!(class.types[class.methods[*ctor].class].origin, Origin::Lambda { .. })
+            {
+                out.push((*ctor, &captures[..]));
+                break;
+            }
+            e = inner;
+        }
+    }
+    out
+}
+
+/// The field of the lambda class whose constructor is `ctor` that its parameter `k` is stored in.
+fn capture_field(ctor: &Method, k: usize) -> Option<&str> {
+    let param = &ctor.params.get(k)?.name;
+    ctor.body.iter().find_map(|s| match s {
+        Stmt::Expr(Expr {
+            kind: ExprKind::Assign { op: None, target: Place::Field { object, name }, value },
+            ..
+        }) if matches!(object.kind, ExprKind::This)
+            && matches!(&value.kind, ExprKind::Var(v) if v == param) =>
+        {
+            Some(name.as_str())
         }
         _ => None,
+    })
+}
+
+/// Whether the methods of lambda class `lambda` only call its capture `field` and lend it on
+/// (`only_called`), so that it may hold a lent closure.
+fn field_lent(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    lambda: usize,
+    field: &str,
+    lent: &FastSet<(usize, usize)>,
+) -> bool {
+    (class.methods.iter())
+        .filter(|m| m.class == lambda && !m.is_ctor)
+        .all(|m| only_called(class, closure_types, &m.body, Read::ThisField(field), lent, true))
+}
+
+/// `e` without its casts between closure types.
+fn peel_closure_casts<'e>(e: &'e Expr, closure_types: &FastSet<usize>, class: &Class) -> &'e Expr {
+    match &e.kind {
+        ExprKind::Cast(to, inner) if class.class_index(*to).is_some_and(|t| closure_types.contains(&t)) => {
+            peel_closure_casts(inner, closure_types, class)
+        }
+        _ => e,
     }
+}
+
+/// The node inside `e` that reads the closure variable `read`, when `e` reads it, through casts
+/// to closure types.
+fn closure_read(e: &Expr, read: Read, closure_types: &FastSet<usize>, class: &Class) -> Option<ExprId> {
+    let inner = peel_closure_casts(e, closure_types, class);
+    read.reads(inner).then_some(inner.id)
 }
 
 /// The locals of closure types, by method and name, that are only called: each declaration of
@@ -360,7 +538,9 @@ pub fn closure_locals(
             );
         }
         for name in declared.keys() {
-            if !assigned.contains(name) && only_called(class, closure_types, &m.body, name, lent) {
+            if !assigned.contains(name)
+                && only_called(class, closure_types, &m.body, Read::Var(name), lent, false)
+            {
                 out.insert((index, name.clone()));
             }
         }
