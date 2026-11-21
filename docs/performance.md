@@ -770,12 +770,14 @@ each cast whose `ClassCastException` a `catch` sees, and each operation whose fa
 (`Facts::raising`, `Facts::catching`), was written in its checked form (`Gen::check_casts`,
 `Gen::check_catching`). Each check rejects every one it misses, first to last by line and
 column, as the check of dereferences does, so that a census stubs them all in one round
-rather than one per round: on the Minecraft server, two casts in the arguments of natives that
-the runtime lacks (`XInputMethod.java:89`, `BufImgSurfaceData.java:125`), where a round after
-the first takes about 690 s (analyses 430 s, generator 256 s). The census stubs the same code
-in the same order as a round per cast would, so its report and translation are the same.
-`a_census_stubs_every_cast_the_generator_misses_in_one_round`
-(`tests/translation.rs`) has two such casts, stubbed in one round.
+rather than one per round. The census stubs the same code in the same order as a round per
+error would, so its report and translation are the same.
+`a_census_stubs_every_local_the_generator_rejects_in_one_round` (`tests/translation.rs`) has
+three methods whose locals the generator rejects, stubbed in one round. None of the checks looks
+in the arguments of a native that the runtime lacks, which are not written
+(`Gen::missing_native_arguments`): the casts in the arguments of the Minecraft server's
+missing natives (`XInputMethod.java:89`, `BufImgSurfaceData.java:125`) are no errors, and no
+module of the server is written again with stubs.
 
 **Order of the methods solved for the objects on the stack.** The analysis of the objects
 that may live on the stack (`analysis/escape.rs`) solves each method's summary again whenever
@@ -905,9 +907,9 @@ stopped before the analyses finished runs the analyses again, as does a census r
 The translation of a census that kept its facts may differ from one that ran the analyses again
 where the facts of stubbed code reach, as a stubbed method keeps the form its callers saw (it
 may still return a `Result`); a stub never runs past its first line, so the program behaves the
-same. `a_census_stubs_every_cast_the_generator_misses_in_one_round` (`tests/translation.rs`)
-runs the analyses and the generator once for its two rounds of stubs, one of them in a method
-with a dereference whose `NullPointerException` is caught.
+same. `a_census_stubs_every_local_the_generator_rejects_in_one_round` (`tests/translation.rs`)
+runs the analyses and the generator once for its stubs, one of them in a method with a
+dereference whose `NullPointerException` is caught.
 
 **Stubs written in the same run of the generator.** The round after stubs that only replaced
 method bodies would run the whole generator again (about 260 s on the Minecraft server) only to
@@ -931,15 +933,14 @@ generator writes the whole program again in the same run, as the next round woul
 the stubs changed more than a body or an error stayed, the generator stops after its first round
 and the census goes on as before, to a round that runs the analyses again. So a census whose
 stubs only replace bodies runs the generator once. The Minecraft server's pass 3 has had only
-such stubs (a `toString` whose exception is caught, messages of `NullPointerException`s, casts
-in the arguments of natives the runtime lacks). javac's census is the same byte for byte,
+such stubs (a `toString` whose exception is caught, messages of `NullPointerException`s). javac's census is the same byte for byte,
 report and translation: of its 18 errors in pass 3, 5 are in methods that an earlier error of the
 same round stubbed, which counts as an error no stub took away, so it runs the analyses again as
 before, and its first run of the generator now stops after the first round (2.7 s rather than
 4.4 s). Taking those errors as clean instead, the generator writes 102 of javac's 169 modules
 again in 2.3 s, where a whole run takes 4.3 s, and its translation is the same byte for byte as
 the whole generator's on the same stubbed program.
-`a_census_stubs_every_cast_the_generator_misses_in_one_round` compares a census with one that
+`a_census_stubs_every_local_the_generator_rejects_in_one_round` compares a census with one that
 runs the generator again for the stubs (`program::generator_again`): report, JSON and
 translation are the same.
 

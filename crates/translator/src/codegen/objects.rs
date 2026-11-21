@@ -1073,6 +1073,33 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// The expressions in the arguments of the natives that the runtime does not have, which are
+    /// written as code that never runs (`Native::Missing`), without their arguments: none of
+    /// them is written, so no check of theirs is missed. A translation in which such a call can
+    /// run is rejected for the native (`live_methods`); in a census the call is the stub of
+    /// that, and the report lists the native as missing from the runtime.
+    pub(super) fn missing_native_arguments(&self) -> HashSet<ExprId> {
+        let mut unwritten = HashSet::new();
+        for stmt in self.class.methods.iter().flat_map(|m| &m.body) {
+            visit_stmt(
+                stmt,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Builtin(Builtin::Native(Native::Missing { .. }), args) = &x.kind {
+                            for arg in args {
+                                visit_expr(arg, &mut |a| {
+                                    unwritten.insert(a.id);
+                                });
+                            }
+                        }
+                    })
+                },
+                &mut |_| {},
+            );
+        }
+        unwritten
+    }
+
     /// Rejects the program when an object of `Facts::null_checked` is dereferenced by code that
     /// does not write the checked form, where its `NullPointerException` would end the program
     /// instead of reaching the `catch` or the `finally`.
@@ -1095,25 +1122,7 @@ impl<'a> Gen<'a> {
                 &mut |_| {},
             );
         }
-        // The arguments of a native that the runtime does not have, which is written as code
-        // that never runs (`Native::Missing`).
-        for stmt in self.class.methods.iter().flat_map(|m| &m.body) {
-            visit_stmt(
-                stmt,
-                &mut |e| {
-                    visit_expr(e, &mut |x| {
-                        if let ExprKind::Builtin(Builtin::Native(Native::Missing { .. }), args) = &x.kind {
-                            for arg in args {
-                                visit_expr(arg, &mut |a| {
-                                    unwritten.insert(a.id);
-                                });
-                            }
-                        }
-                    })
-                },
-                &mut |_| {},
-            );
-        }
+        unwritten.extend(self.missing_native_arguments());
         // Each one, first to last, as the generator reports what it rejects (`generate_all`).
         let mut missed: Vec<Pos> = self
             .facts

@@ -42,7 +42,9 @@ A native that the runtime lacks becomes `Native::Missing`. Where it can run, the
 rejected with ``native method `Class.name(signature)` not supported yet``
 (`analysis/live_methods.rs`); where it cannot (a branch that only a direct buffer takes, say), it
 is code that never runs: `unreachable!` in a block that gives it the type of the call, as Rust's
-`!` is no type that a local, an operator or a borrow can take.
+`!` is no type that a local, an operator or a borrow can take. Its arguments are not written
+either, so a cast or a dereference in them needs no checked form where a `catch` sees its
+exception (`Gen::missing_native_arguments`).
 
 Some methods are replaced at the call, before their argument is lowered, so that reachability
 never enters them (`REPLACED_METHODS` in `program/reach.rs`). They take a `Class`, which the
