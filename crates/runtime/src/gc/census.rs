@@ -36,13 +36,14 @@
 //!   a zero is as often a number, or the unused end of a slot.
 //!
 //! **Types.** With `JAVA_GC_CENSUS=3`, every allocation records the Rust type of what it holds,
-//! from the program's start: `java::Arc::new` the type of the object (`gc::note_type`),
+//! from the program's start: `java::Arc::new` the type of the object (`gc::take_slot_cold`, which
+//! every object reaches then, as each span is one slot), an array its type (`gc::note_type`),
 //! `java::JStr` its string, and every other allocation that it holds none (`note_untyped`), in a
 //! table beside the heap of 2 bytes per 16 (`SHADOW`), a type's number in a table of type names
 //! (`NAMES`). The census then counts each type's objects, and the buffers its objects own (the
 //! slots their buffer words point to: the elements of an array, a `Vec`, a plain string), and
 //! lists the slots of no type that no object owns by size. Off, the cost is one load and branch
-//! per allocation.
+//! per allocation other than an object's, and none for an object.
 //!
 //! It reports, to standard error and without allocating:
 //!

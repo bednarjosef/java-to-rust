@@ -41,18 +41,10 @@ impl<T> Arc<T> {
         if const { std::mem::size_of::<T>() == 0 } {
             return Arc::new_zero_sized(value);
         }
-        // A slot of the thread's free list or span where there is one, taken inline (`take_slot`);
-        // otherwise the global allocator's path, which refills them.
-        let slot = crate::gc::take_slot::<T>() as *mut T;
-        let Some(ptr) = NonNull::new(slot) else {
-            let ptr = crate::gc::alloc_object(std::alloc::Layout::new::<T>()) as *mut T;
-            unsafe { ptr.write(value) };
-            let ptr = unsafe { NonNull::new_unchecked(ptr) };
-            crate::gc::note_type::<T>(ptr.as_ptr());
-            return Arc { ptr, owns: PhantomData };
-        };
+        // A zeroed slot of the thread's span, taken inline, or of the cold path behind it, which
+        // also records the type for the census (`take_slot`); never null.
+        let ptr = unsafe { NonNull::new_unchecked(crate::gc::take_slot::<T>() as *mut T) };
         unsafe { ptr.as_ptr().write(value) };
-        crate::gc::note_type::<T>(ptr.as_ptr());
         Arc { ptr, owns: PhantomData }
     }
 

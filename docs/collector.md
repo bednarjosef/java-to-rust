@@ -121,20 +121,22 @@ owned, and that Rust therefore never freed, is found unreachable too.
 
 ## Allocation
 
-A thread takes a slot of its size from its own free slots, a few instructions: first from the
-list of slots Rust freed (a freed slot goes on the list of the thread that frees it), then from
-its span, a run of neighbouring untaken slots of one block, handed out in order by moving a
-pointer to the next one until it meets the span's end. When both are empty, the thread takes
-the next run of untaken slots under the heap's lock: of its span's block, from where the last
-run ended, or of a block from its class's list, or of a new block. That is one lock per span,
-and touches no slot. A span takes no more slots than fit in 8 KB (`SPAN_BYTES`), one at least:
+A thread takes a slot of its size from its own free slots, a few instructions: from its span, a
+run of neighbouring untaken slots of one block, handed out in order by moving a pointer to the
+next one until it meets the span's end, or from the list of slots Rust freed (a freed slot goes
+on the list of the thread that frees it). An object tries the span first and the list once the
+span is empty (below); the global allocator tries the list first. When both are empty, the
+thread takes the next run of untaken slots under the heap's lock: of its span's block, from where
+the last run ended, or of a block from its class's list, or of a new block. That is one lock per
+span, and touches no slot. A span takes no more slots than fit in 8 KB (`SPAN_BYTES`), one at least:
 each thread keeps a span in every class it allocates in, and spans of whole 64 KB blocks held
 the Minecraft server's 41 threads 28 MB of slots taken and never handed out. In a block of
 young objects that died, the run is the whole 8 KB, 512 slots of 16 bytes, where a span of one
 64-slot word of the bitmap, as before, took 64 and the heap's lock eight times as often:
-BinaryTrees runs 30.5 G instructions instead of 31.9 G. The slots of a new span are fetched into
-the cache right away (up to 4 KB), before the program writes them. Linking every untaken slot of
-a block into a list, as the allocator did before, cost 5% of the translated
+BinaryTrees runs 30.5 G instructions instead of 31.9 G. The slots of a new span are zeroed right
+away if they may hold pointers (below), which also brings them into the cache, and are fetched
+into the cache (up to 4 KB) if they hold none, before the program writes them. Linking every
+untaken slot of a block into a list, as the allocator did before, cost 5% of the translated
 javac's time on the Minecraft benchmark, but it also brought the block into the cache: spans
 without the prefetch were no faster, with it they are 3% faster (29.8 s to 28.9 s).
 
@@ -150,16 +152,24 @@ rest of the word it runs 5.81 G instructions instead of 6.52 G (6.20 G instead o
 chunks), while BinaryTrees, SmallObjects and ManyThreadsAllocating run as many as before.
 
 An object (`java::Arc::new`) takes its slot inline (`take_slot`): its class and size are
-constants of the object's type there, so taking it is the thread-local free list's head or the
-span's next slot, and zeroing it a few stores; when both are empty it goes through the global
-allocator, which refills them. The zeroing ends in an empty `asm!` that may read memory
-(`zero_slot`): without it the compiler drops the zeroes that the object's store overwrites, and a
-store of a whole value counts as overwriting the bytes it leaves undefined, an enum's smaller
-variant's and the padding, so those kept the words of the slot's last object, which kept what
-they pointed to alive (the Minecraft server had about 60 MB more alive, 370 MB against 308, and
-ran slower). The barrier costs BinaryTrees and SmallObjects nothing measurable (1.05 s and
-0.135 s, against 1.04 s and 0.131 s without it, and 1.38 s and 0.188 s through the global
-allocator). Through the global allocator, a call that is not inlined and
+constants of the object's type there, and a span's slots are zeroed already, so taking the span's
+next slot is a load, a compare and a store. Everything else is one function, not inlined, that
+is given the class and never returns null (`take_slot_cold`): the free list, which an object
+takes from only once its span is empty, a new span (`refill`), and the census of types. In
+`examples/allocation.rs` (pairs of 24- and 48-byte objects) an object takes 22.7 of the allocating
+thread's instructions where all die young, against 34.2 when the inline take also tried the free
+list, tested the slot for null, zeroed it and tested for the census; where one in eight is kept
+and the spans are short, 58.9 against 75.9 with the collector's markers, and 120.1 against 138.0
+with one marker, which then marks on the allocating thread. A slot of the free
+list is zeroed as it is taken, and in the global allocator the zeroing ends in an empty `asm!`
+that may read memory (`zero_freed`): inlined, without it the compiler drops the zeroes that the
+value's store overwrites, and a store of a whole value counts as overwriting the bytes it leaves
+undefined, an enum's smaller variant's and the padding, so those kept the words of the slot's last
+object, which kept what they pointed to alive (the Minecraft server had about 60 MB more alive,
+370 MB against 308, and ran slower). For an array and in the global allocator it is zeroed after
+the closure that reads the thread's lists, not in it: with the zeroing in it, the closure grew
+past what the compiler inlines, every such allocation called it, and ChunkSections ran 16% more
+instructions (6.67 G against 5.72 G). Through the global allocator, a call that is not inlined and
 works out the class from the size it is given, BinaryTrees spent about 40% of its main thread in
 that call; inline, it runs 17.0 G cycles against 19.7 G, SmallObjects 2.06 G against 2.23 G, and
 no other benchmark runs more (NodeList, MonitoredObjects, ClassCast and NBody 5-20% fewer). The
@@ -185,14 +195,15 @@ out only objects and arrays keeps only its last slot, so that what weak referenc
 an older span is still lost, and the thread's end then frees its slot a second time, so the
 runtime gives its own threads no std names; the runtime's tests, whose threads the harness names,
 rely on the names coming from the current span. Reading the C library allocator's memory would
-close this. A slot that may hold
-pointers is zeroed whole as it is handed out, so no word left from an old object, in a part the
-program does not write (the spare capacity of a `Vec`, an enum's unused bytes, padding), keeps
-anything alive; a slot of a
-pointer-free block is zeroed only for `alloc_zeroed`. Zeroing there rather than when a slot is
-freed touches memory the program is about to write anyway: zeroing dead slots in the sweep took
-0.8 s of the translated javac's 30 s on the Minecraft benchmark, mostly on cache lines nothing
-else touched; at allocation the sweep takes 11 ms and the run is 0.4 s faster.
+close this. A slot that may hold pointers is zeroed whole before it is handed out, so no word
+left from an old object, in a part the program does not write (the spare capacity of a `Vec`, an
+enum's unused bytes, padding), keeps anything alive: a span's slots all at once when the thread
+takes it (`fill_span`), after the heap's lock is let go, as a collection meanwhile keeps them and
+scans none, and a slot of the free list as it is taken. A slot of a pointer-free block is zeroed
+only for `alloc_zeroed`. Zeroing at allocation rather than when a slot is freed touches memory
+the program is about to write anyway: zeroing dead slots in the sweep took 0.8 s of the
+translated javac's 30 s on the Minecraft benchmark, mostly on cache lines nothing else touched; at
+allocation the sweep takes 11 ms and the run is 0.4 s faster.
 
 ## Collection
 
@@ -533,7 +544,9 @@ thread unregisters when it ends; its later frees during its exit go straight bac
 - `JAVA_GC_THREADS=<n>` marks with `n` markers in all, and with more than one marks in parallel
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
 - `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,
-  bytes taken since the last, bytes alive, heap size, and the time spent marking and sweeping.
+  bytes taken since the last, bytes alive, heap size, the time spent marking and sweeping, and
+  the spans the threads took since the last (those under the heap's lock, the rest from the
+  bits beyond a run, `span_from_rest`) with their slots on average.
   `JAVA_GC_LOG=2` adds, after each full collection, the bytes alive in each slot size and in
   large allocations, and the blocks each takes.
 - `JAVA_GC_GENERATIONS=1` with `JAVA_GC_EVERY=1` makes most collections minor ones, at every
@@ -551,8 +564,10 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   2, also per slot size, and per class number of the objects that `java::Thin`s reach; with 3,
   also per Rust type, each type's objects and the buffers they own (an array's elements, a plain
   string's bytes), and the slots of no type by size, to set beside a JVM's class histogram. Level
-  3 records each allocation's type from the start, in a table beside the heap of 2 bytes per 16;
-  without it the cost is one load and branch per allocation, not measurable on BinaryTrees.
+  3 records each allocation's type from the start, in a table beside the heap of 2 bytes per 16,
+  with spans of one slot, so that every object reaches the out-of-line path that records it
+  (`take_slot_cold`); without it the cost is one load and branch per allocation other than an
+  object's.
   With 4 (`gc/who.rs`), also what holds the objects of the types that `JAVA_GC_CENSUS_WHO`
   names (parts of type names, comma-separated, or `untyped:<size>` for the slots of that size
   of no type that no object owns): the holders' types (an object, the buffer an object of a type
