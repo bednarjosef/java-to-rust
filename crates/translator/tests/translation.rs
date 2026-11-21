@@ -1158,6 +1158,37 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
 }
 
 #[test]
+fn a_dispatcher_takes_the_numbers_of_abstract_classes_between_its_arms() {
+    // Fluid 1, Empty 2, Flowing 3 (abstract), Lava 4, Steam 5 (never made), Water 6. No object
+    // has Flowing's number, so Empty's arm takes it, and the arms then span the numbers that a
+    // cast to Fluid right before the call tests; Steam's number, which an object of a class that
+    // is not made could still have by a bug of the analyses, stays `bad_tag`'s.
+    let rust = translate(
+        "abstract class Fluid { abstract boolean ticks(); }
+        class Empty extends Fluid { boolean ticks() { return false; } }
+        abstract class Flowing extends Fluid { }
+        class Lava extends Flowing { boolean ticks() { return true; } }
+        class Steam extends Flowing { boolean ticks() { return true; } }
+        class Water extends Flowing { boolean ticks() { return false; } }
+        class A { public static void main(String[] a) {
+            Object[] fluids = { new Empty(), new Lava(), new Water(), \"x\" };
+            int n = 0;
+            for (Object o : fluids) {
+                if (o instanceof Fluid && ((Fluid) o).ticks()) n++;
+            }
+            System.out.println(n);
+        } }",
+    );
+    let at = rust.find("fn Fluid__ticks(").unwrap_or_else(|| panic!("no dispatcher in:\n{rust}"));
+    let dispatcher = &rust[at..at + rust[at..].find("\n}\n").unwrap()];
+    assert_contains(
+        dispatcher,
+        &["\n        2 | 3 => ", "\n        4 => ", "\n        6 => ", "tag => java::bad_tag(tag),"],
+    );
+    assert_lacks(dispatcher, &["..=", "| 5", "5 => "]);
+}
+
+#[test]
 fn a_dispatcher_over_many_classes_runs_each_call_in_a_function_of_its_own() {
     // With a profile, LLVM inlines the hot arms of a `match` over thousands of classes into the
     // dispatcher, whose frame then holds all their stack slots; a function of its own per arm

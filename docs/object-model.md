@@ -330,8 +330,17 @@ Rules:
   string, a box, a Java enum constant, an array, a builder) is held in the low six bytes when it
   fits there and in a box otherwise; an array, a builder, a box with identity and a string with
   identity (`java::JStr`) are their own handles. A number that no class of the type has is a bug
-  the view reports (`java::bad_tag`). In a `match` of a method on the number, though, the arm
-  whose classes are in the most runs (more than four) is the last arm, `_`, in place of that
+  the view reports (`java::bad_tag`). A `match` of a method on the number gives the numbers of
+  abstract classes and interfaces that lie between two arms' classes (up to eight in a row) to
+  the arm before, each number written alone (`2 | 3 =>`, `Gen::dispatch_patterns`): no object
+  has them, as only a variant's constructor makes a `Thin`, and with every number from the first
+  arm's to the last's taken, LLVM drops the `match`'s test for `bad_tag` where a test of "is a
+  `C`" comes right before it, as a cast's or a getter's that a call is made on
+  (`FluidState.getType().isRandomlyTicking()` on the Minecraft server, a range and then a
+  `match` with three gaps). Written as ranges, the numbers are compares in a chain that LLVM
+  does not fold so; a list is one `switch`. A number of a concrete class that no arm takes still
+  goes to `bad_tag`, even where the analyses found that class never made. In such a `match`, the
+  arm whose classes are in the most runs (more than four) is the last arm, `_`, in place of that
   report: rustc tests a pattern's runs one by one before it switches on the other numbers, and
   the Minecraft server's `Object::hash_code` spent its time walking the 3 750 runs of the classes
   whose hash is their address.

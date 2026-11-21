@@ -522,6 +522,8 @@ struct Setup {
     /// read's id (`dispatch::proven_sets`).
     proven_sets: HashMap<ExprId, std::sync::Arc<[usize]>>,
     class_tags: Vec<u16>,
+    /// The numbers of the types that objects can be of, in order (`dispatch::object_numbers`).
+    object_numbers: Vec<u16>,
     runs: Vec<bool>,
     super_targets: HashSet<usize>,
     /// The program's modules, in the order they are written.
@@ -551,6 +553,7 @@ impl Setup {
             ("profiled", self.profiled == other.profiled),
             ("proven_sets", self.proven_sets == other.proven_sets),
             ("class_tags", self.class_tags == other.class_tags),
+            ("object_numbers", self.object_numbers == other.object_numbers),
             ("runs", self.runs == other.runs),
             ("super_targets", self.super_targets == other.super_targets),
             ("plans", self.plans == other.plans),
@@ -588,6 +591,7 @@ impl Setup {
             .collect();
         let fn_name_set = fn_names.iter().cloned().collect();
         let class_tags = dispatch::class_numbers(class);
+        let object_numbers = dispatch::object_numbers(class, &class_tags);
         let profiled = dispatch::profiled_sets(class, &class_tags);
         let proven_sets = dispatch::proven_sets(class, facts);
         let mut setup = Setup {
@@ -608,6 +612,7 @@ impl Setup {
             profiled,
             proven_sets,
             class_tags,
+            object_numbers,
             runs: phase("codegen: setup: running types", || running_types(class, facts)),
             super_targets: phase("codegen: setup: super targets", || super_targets(class)),
             plans: phase("codegen: setup: plans", || modules::plans(class)),
@@ -760,6 +765,7 @@ impl<'a> Gen<'a> {
             conversion_names: setup.conversion_names.clone(),
             live: &setup.live,
             class_tags: &setup.class_tags,
+            object_numbers: &setup.object_numbers,
             runs: &setup.runs,
             wanted: round.wanted,
             impl_needs: &round.impl_needs,
@@ -1015,6 +1021,8 @@ struct Gen<'a> {
     live: &'a [bool],
     /// The number of each type in a `java::Thin` (see `dispatch::class_numbers`).
     class_tags: &'a [u16],
+    /// The numbers of the types that objects can be of (see `dispatch::object_numbers`).
+    object_numbers: &'a [u16],
     /// Which classes' instance methods can run (see `running_types`).
     runs: &'a [bool],
     /// The enum items to write, which an earlier pass found used (see `generate`).

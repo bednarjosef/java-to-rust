@@ -70,6 +70,19 @@ pub(super) fn class_numbers(class: &Class) -> Vec<u16> {
     numbers
 }
 
+/// The numbers (`numbers`, from `class_numbers`) of the types that objects can be of, in order:
+/// all but those of abstract classes, interfaces and type variables, which nothing is made of
+/// (`Hierarchy::is_concrete`). Only a variant's constructor makes a `java::Thin` of the program,
+/// with its class's number (`Gen::variant_constructor`), and the variants are concrete classes,
+/// so no value has the number of any other type, whatever the analyses found
+/// (`Gen::dispatch_patterns`).
+pub(super) fn object_numbers(class: &Class, numbers: &[u16]) -> Vec<u16> {
+    let mut found: Vec<u16> =
+        (0..class.types.len()).filter(|&t| class.hierarchy.is_concrete(t)).map(|t| numbers[t]).collect();
+    found.sort_unstable();
+    found
+}
+
 /// The binary name of type `t` of `class`, not an array's, as `Class.getName()` gives it
 /// (`Gen::binary_name`), which names a class in a dispatch profile (`profiled_sets`) too.
 /// The name of each type in a dispatch profile, `None` for arrays: its binary name, which stays
@@ -141,6 +154,15 @@ const LAST_ARM_RUNS: usize = 4;
 /// The most runs of class numbers that a test of an interface by the class number (`as_x()`) is a
 /// `match` of; one of more runs is a `java::ClassSet`, a bit per number, one load and a shift.
 const SET_RUNS: usize = 4;
+
+/// The most numbers of no object between two arms' classes that an arm of a `match` on the
+/// class number takes (`Gen::dispatch_patterns`).
+const GAP_MOST: u16 = 8;
+
+/// A run of class numbers `(first, last)` in a pattern: `4..=9`, or `4`.
+fn tag_range((first, last): (u16, u16)) -> String {
+    if first == last { format!("{first}") } else { format!("{first}..={last}") }
+}
 
 /// How many class numbers each method of a cut `match` on the class number takes
 /// (`match_arms_or`).
@@ -623,11 +645,9 @@ impl<'a> Gen<'a> {
     /// (the Minecraft server's some 20 000 classes) are hundreds of groups, and a search of the
     /// group for each class of `among`, once per group, took seconds.
     pub(super) fn tag_patterns(&self, groups: &[&[usize]], among: &[usize]) -> Vec<String> {
-        let range =
-            |(first, last)| if first == last { format!("{first}") } else { format!("{first}..={last}") };
         self.tag_runs(groups, among)
             .into_iter()
-            .map(|runs| runs.into_iter().map(range).collect::<Vec<_>>().join(" | "))
+            .map(|runs| runs.into_iter().map(tag_range).collect::<Vec<_>>().join(" | "))
             .collect()
     }
 
@@ -715,6 +735,58 @@ impl<'a> Gen<'a> {
             open = group;
         }
         runs
+    }
+
+    /// The patterns of the arms of a `match` on the class number over `groups`, among the
+    /// classes `among`, with how many runs each pattern has of the classes of its group: `tags`,
+    /// and after each group's run the numbers up to the next group's, where there are at most
+    /// `GAP_MOST` and no object can have any of them (those of abstract classes and interfaces,
+    /// `object_numbers`), each written alone (`7 | 8 | 9`). The arms then take every number
+    /// from their first to their last. A test that an object is a `C` is one range from `C`'s
+    /// number to its last subclass's (`class_numbers`), with the abstract classes of `C`'s tree
+    /// numbered between its concrete ones: where the test comes right before the `match` on the
+    /// same value, as a cast's or a getter's that a call is made on, LLVM finds the `match`'s
+    /// numbers all tested and drops the `match`'s own test for a number of no arm
+    /// (`java::bad_tag`), which it keeps where the arms leave gaps. Written as ranges, the
+    /// numbers would be compares in a chain that LLVM does not fold so; a list is one `switch`.
+    /// Every number that an object can have and no arm takes still goes to `bad_tag`.
+    fn dispatch_patterns(&self, groups: &[&[usize]], among: &[usize]) -> Vec<(String, usize)> {
+        let runs = self.tag_runs(groups, among);
+        let gaps = self.gaps_after(&runs);
+        runs.into_iter()
+            .zip(gaps)
+            .map(|(runs, gap)| {
+                let count = runs.len();
+                let mut items: Vec<(u16, u16)> =
+                    runs.into_iter().chain(gap.into_iter().map(|n| (n, n))).collect();
+                items.sort_unstable();
+                (items.into_iter().map(tag_range).collect::<Vec<_>>().join(" | "), count)
+            })
+            .collect()
+    }
+
+    /// For each group of `runs` (`tag_runs`), the numbers of `dispatch_patterns`'s gaps: those
+    /// after one of its runs and before the next run, which is another group's, where there are
+    /// at most `GAP_MOST` of them and no object can have any.
+    fn gaps_after(&self, runs: &[Vec<(u16, u16)>]) -> Vec<Vec<u16>> {
+        let mut all: Vec<(u16, u16, usize)> = (runs.iter().enumerate())
+            .flat_map(|(g, runs)| runs.iter().map(move |&(first, last)| (first, last, g)))
+            .collect();
+        all.sort_unstable();
+        let mut gaps = vec![Vec::new(); runs.len()];
+        for pair in all.windows(2) {
+            let ((_, last, h), (first, _, g)) = (pair[0], pair[1]);
+            if h != g && last < first && first - last - 1 <= GAP_MOST && self.no_object_between(last, first) {
+                gaps[h].extend(last + 1..first);
+            }
+        }
+        gaps
+    }
+
+    /// Whether no object can have a number after `a` and before `b` (`object_numbers`).
+    fn no_object_between(&self, a: u16, b: u16) -> bool {
+        let next = self.object_numbers.partition_point(|&n| n <= a);
+        self.object_numbers.get(next).is_none_or(|&n| n >= b)
     }
 
     /// The constructor of the variant of class `c` on the enum named `name`
@@ -2974,9 +3046,11 @@ impl<'a> Gen<'a> {
         // does: one jump to the class's code rather than one to the view and one to the code.
         let me = self.me();
         // An arm that does not read the object is written once for every class that runs its
-        // text, where the first of them is.
-        let mut lines: Vec<Result<(String, String), usize>> = Vec::new();
+        // text, where the first of them is. One that reads it is its class's alone, of `own`: `Ok`
+        // of the class's place there and the arm's code.
+        let mut lines: Vec<Result<(usize, String), usize>> = Vec::new();
         let mut alike: Vec<(String, Vec<usize>)> = Vec::new();
+        let mut own: Vec<usize> = Vec::new();
         let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         // In a dispatcher over many classes, each arm runs its call in a function of its own that
         // nothing inlines into the dispatcher: with a profile (`-Cprofile-use`) LLVM inlined the
@@ -2991,7 +3065,6 @@ impl<'a> Gen<'a> {
         let frames = self.arm_frames.clone().filter(|_| variants.len() > OWN_FRAME_ABOVE);
         let thin = self.runtime("Thin");
         for (c, text, uses) in arms {
-            let tag = self.class_tag(c);
             if uses {
                 let payload = self.payload(c);
                 // The class number is the one its constructor gives.
@@ -3009,7 +3082,8 @@ impl<'a> Gen<'a> {
                         self.lent_object(c, &format!("{me}.0"))
                     ),
                 };
-                lines.push(Ok((tag.to_string(), body)));
+                lines.push(Ok((own.len(), body)));
+                own.push(c);
             } else if let Some(&i) = index.get(&text) {
                 alike[i].1.push(c);
             } else {
@@ -3018,15 +3092,23 @@ impl<'a> Gen<'a> {
                 alike.push((text, vec![c]));
             }
         }
-        let groups: Vec<&[usize]> = alike.iter().map(|(_, classes)| classes.as_slice()).collect();
+        // Each class of `own` is a group of its own, after `alike`'s.
+        let groups: Vec<&[usize]> = alike
+            .iter()
+            .map(|(_, classes)| classes.as_slice())
+            .chain(own.iter().map(std::slice::from_ref))
+            .collect();
         // A run of numbers in a pattern spans only the classes of its arm among those the value
-        // may be of, which, where others run `otherwise`, are not only `variants`.
-        let patterns = self.tag_patterns(&groups, numbers);
+        // may be of, which, where others run `otherwise`, are not only `variants`, and the arm
+        // takes the numbers of no object up to the next arm's (`dispatch_patterns`).
+        let (patterns, runs): (Vec<String>, Vec<usize>) =
+            self.dispatch_patterns(&groups, numbers).into_iter().unzip();
+        let own_patterns = &patterns[alike.len()..];
         if closed {
             let arms: Vec<(String, String)> = lines
                 .into_iter()
                 .map(|line| match line {
-                    Ok((tag, body)) => (tag, body),
+                    Ok((k, body)) => (own_patterns[k].clone(), body),
                     Err(i) => (patterns[i].clone(), alike[i].0.clone()),
                 })
                 .collect();
@@ -3050,14 +3132,13 @@ impl<'a> Gen<'a> {
         // Minecraft server's `Object::hash_code` spent its time in the 3 750 runs of the classes
         // whose hash is their address. As the match's last arm, `_`, it costs nothing: no value has
         // a number that no variant has.
-        let runs = |pattern: &String| pattern.matches(" | ").count() + 1;
         let last = (0..alike.len())
             .filter(|_| otherwise.is_none())
-            .max_by_key(|&i| (runs(&patterns[i]), std::cmp::Reverse(i)))
-            .filter(|&i| runs(&patterns[i]) > LAST_ARM_RUNS);
+            .max_by_key(|&i| (runs[i], std::cmp::Reverse(i)))
+            .filter(|&i| runs[i] > LAST_ARM_RUNS);
         for line in lines {
             match line {
-                Ok((tag, body)) => self.line(&format!("{tag} => {body}")),
+                Ok((k, body)) => self.line(&format!("{} => {body}", own_patterns[k])),
                 Err(i) if Some(i) == last => {}
                 Err(i) => self.line(&format!("{} => {},", patterns[i], alike[i].0)),
             }
