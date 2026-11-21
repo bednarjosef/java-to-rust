@@ -64,6 +64,8 @@
 # PGO_TICKS          the ticks of the sprint that the trial-pgo step trains on (default 30000)
 # PGO_STACK_MB       the stack of each thread of the trial-pgo step's counting build, in megabytes
 #                    (default 256)
+# PGO_RUSTC_STACK_MB the stack of rustc's threads, and the stack limit, for the trial-pgo step's
+#                    build from the profile, in megabytes (default 1024)
 # SERVER_SECONDS     how long a run of the server may take to start and stop (default 600)
 # BENCH              which server the bench step measures: java (default) or trial; BENCH_SEED,
 #                    BENCH_RADIUS, BENCH_WARMUP and BENCH_TICKS shape its run (see bench_input);
@@ -767,7 +769,25 @@ trial-pgo() {
     BENCH=trial BENCH_TICKS=${PGO_TICKS:-30000} bench
   )
   "$profdata" merge -o "$dir/merged.profdata" "$dir/profiles"
-  TRIAL_RUSTFLAGS="${TRIAL_RUSTFLAGS:-} -Cprofile-use=$dir/merged.profdata" trial
+  # rustc gets PGO_RUSTC_STACK_MB of stack for the build from the profile, in its threads
+  # (RUST_MIN_STACK) and in its main thread and a linker's (the limit): on rustc's default,
+  # LLVM's region analysis, which recurses over a function's dominator tree, overflowed it on
+  # the binary's crate, where the profile has LLVM inline the hot calls into functions far
+  # larger than a plain build's. A build that fails here leaves the counting build's binary in
+  # place, so the step ends in an error unless the binary is newer than the profile and has no
+  # counters in it.
+  local rustc_mb=${PGO_RUSTC_STACK_MB:-1024}
+  (
+    ulimit -s $((rustc_mb * 1024)) || true
+    export RUST_MIN_STACK=$((rustc_mb << 20))
+    TRIAL_RUSTFLAGS="${TRIAL_RUSTFLAGS:-} -Cprofile-use=$dir/merged.profdata" trial
+  )
+  local binary
+  binary=$(trial_binary)
+  if [ ! "$binary" -nt "$dir/merged.profdata" ] || readelf -S "$binary" | grep -q __llvm_prf_cnts; then
+    echo "the build from the profile failed: $binary is still the counting build" >&2
+    exit 1
+  fi
 }
 
 # The server on Java, from the jars, in java-run: what the trial's run is compared with.
