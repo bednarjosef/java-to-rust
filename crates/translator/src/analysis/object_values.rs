@@ -239,7 +239,7 @@ impl ClassSet {
     }
 
     /// Adds the classes of `other`; whether that added any.
-    fn union(&mut self, other: &ClassSet) -> bool {
+    pub(super) fn union(&mut self, other: &ClassSet) -> bool {
         // A copy of this set (copies share their words) adds nothing.
         if self.start == other.start && Rc::ptr_eq(&self.words, &other.words) {
             return false;
