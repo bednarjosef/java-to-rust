@@ -287,12 +287,10 @@ impl Session {
         crate::timings::note_javac();
         self.received += line.len();
         let start = std::time::Instant::now();
-        let mut tree = parse(&line).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
+        let units =
+            parse_units(&line, parse_threads()).map_err(|e| fail(format!("unreadable javac tree: {e}")))?;
         self.parsing += start.elapsed();
-        Ok(match tree["units"].take() {
-            Value::Array(units) => units.into(),
-            _ => Vec::new(),
-        })
+        Ok(units)
     }
 
     /// Why javac stopped: the compile error that it printed.
@@ -348,6 +346,125 @@ impl Drop for Session {
     }
 }
 
+/// How many threads read the units of a line of javac's trees (`parse_units`):
+/// `JAVA_TO_RUST_PARSE_THREADS`, or one for each core, at most eight.
+fn parse_threads() -> usize {
+    std::env::var("JAVA_TO_RUST_PARSE_THREADS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()).min(8))
+        .max(1)
+}
+
+/// The smallest line of javac's trees that `parse_units` reads on several threads.
+const PARALLEL_BYTES: usize = 1 << 20;
+
+/// The stack of each thread that reads javac's trees: as large as that of the translator's own
+/// (`main.rs`), as `parse` recurses as deep as the trees nest.
+const STACK: usize = 1 << 30;
+
+/// The units of a line of `JavaTree`'s output, `{"units":[...]}` (`JavaTree.print`), read on
+/// `threads` threads when the line is large (`parse_cut`), else as one value; in their order
+/// either way, the same values, or the same error.
+fn parse_units(line: &[u8], threads: usize) -> serde_json::Result<Vec<Value>> {
+    if threads > 1
+        && line.len() >= PARALLEL_BYTES
+        && let Some(units) = parse_cut(line, threads)
+    {
+        return Ok(units);
+    }
+    let mut tree = parse(line)?;
+    Ok(match tree["units"].take() {
+        Value::Array(units) => units.into(),
+        _ => Vec::new(),
+    })
+}
+
+/// The units of a line of javac's trees, each read from its own text on one of `threads`
+/// threads; `None` when the line cannot be cut so (`cut_units`). Every unit starts with
+/// `{"file":"`, which can be nowhere else in the line but at the start of an object of that first
+/// key: inside a string its quotes would be escaped. So the line is cut where one unit ends and
+/// the next starts, after each `}` followed by `,{"file":"`. A cut inside a unit, at an object of
+/// its own with that first key, would leave the part of the unit before it unclosed, which reads
+/// as no value: then this gives `None`, and the line is read whole.
+fn parse_cut(line: &[u8], threads: usize) -> Option<Vec<Value>> {
+    let body = line.strip_prefix(b"{\"units\":[")?.strip_suffix(b"]}\n")?;
+    let pieces = cut_units(body, threads);
+    if pieces.len() < 2 {
+        return None;
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut units: Vec<Option<Value>> = std::iter::repeat_with(|| None).take(pieces.len()).collect();
+    let read = std::thread::scope(|scope| {
+        let readers: Vec<_> = (0..threads.min(pieces.len()))
+            .map(|_| {
+                let (next, pieces) = (&next, &pieces);
+                std::thread::Builder::new()
+                    .name("javac trees".to_string())
+                    .stack_size(STACK)
+                    .spawn_scoped(scope, move || {
+                        let mut read = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(piece) = pieces.get(i) else { return Some(read) };
+                            match parse(piece) {
+                                Ok(unit) => read.push((i, unit)),
+                                Err(_) => {
+                                    // The others stop at their next unit.
+                                    next.store(pieces.len(), std::sync::atomic::Ordering::Relaxed);
+                                    return None;
+                                }
+                            }
+                        }
+                    })
+                    .expect("a thread to read javac's trees")
+            })
+            .collect();
+        let mut all = true;
+        for reader in readers {
+            match reader.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)) {
+                Some(read) => read.into_iter().for_each(|(i, unit)| units[i] = Some(unit)),
+                None => all = false,
+            }
+        }
+        all
+    });
+    read.then(|| units.into_iter().map(|unit| unit.expect("every unit is read")).collect())
+}
+
+/// The texts of the units in `body`, the units of a line separated by commas (`parse_cut`):
+/// cut after each `}` followed by `,{"file":"`, which `threads` threads look for at once, each in
+/// a part of `body`.
+fn cut_units(body: &[u8], threads: usize) -> Vec<&[u8]> {
+    const NEXT: &[u8] = b"},{\"file\":\"";
+    let part = body.len().div_ceil(threads).max(1);
+    let cuts: Vec<usize> = std::thread::scope(|scope| {
+        let finders: Vec<_> = body
+            .chunks(part)
+            .enumerate()
+            .map(|(n, chunk)| {
+                scope.spawn(move || {
+                    let start = n * part;
+                    let ends = chunk.iter().enumerate().filter(|&(_, &b)| b == b'}').map(|(i, _)| start + i);
+                    ends.filter(|&i| body[i..].starts_with(NEXT)).collect::<Vec<usize>>()
+                })
+            })
+            .collect();
+        finders
+            .into_iter()
+            .flat_map(|f| f.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)))
+            .collect()
+    });
+    let mut pieces = Vec::with_capacity(cuts.len() + 1);
+    let mut start = 0;
+    for cut in cuts {
+        pieces.push(&body[start..=cut]);
+        start = cut + 2;
+    }
+    pieces.push(&body[start..]);
+    pieces
+}
+
 /// Reads javac's JSON without serde_json's nesting limit: real code nests deeper than it allows,
 /// in long chains of `+` or `else if`, so the caller runs on a large stack instead.
 fn parse(json: &[u8]) -> serde_json::Result<Value> {
@@ -361,6 +478,55 @@ fn parse(json: &[u8]) -> serde_json::Result<Value> {
 #[cfg(test)]
 mod tests {
     use crate::value::Value;
+
+    /// A line of `JavaTree`'s output with `count` units, the `inner`th of which has an object of
+    /// its own whose first key is `file`, after another in a list.
+    fn units_line(count: usize, inner: Option<usize>) -> Vec<u8> {
+        let units: Vec<String> = (0..count)
+            .map(|i| {
+                let list = if inner == Some(i) { r#"[{"x":1},{"file":"inner"}]"# } else { r#"[{"x":1},{"y":[]}]"# };
+                // A string that holds the text the line is cut at, escaped.
+                format!(
+                    r#"{{"file":"/p/U{i}.java","tree":{{"kind":"CompilationUnit","n":{i},"f":{}.5,"s":"}},{{\"file\":\"x","list":{list}}}}}"#,
+                    i % 7
+                )
+            })
+            .collect();
+        format!("{{\"units\":[{}]}}\n", units.join(",")).into_bytes()
+    }
+
+    /// The units of a line read as one value.
+    fn whole(line: &[u8]) -> Vec<Value> {
+        let mut tree = super::parse(line).expect("the line reads");
+        match tree["units"].take() {
+            Value::Array(units) => units.into(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_line_of_units_reads_the_same_cut_into_its_units() {
+        let line = units_line(500, None);
+        let cut = super::parse_cut(&line, 4).expect("the line is cut into its units");
+        assert_eq!(cut.len(), 500);
+        assert_eq!(cut, whole(&line));
+        // One unit is the line itself, which is read whole.
+        assert!(super::parse_cut(&units_line(1, None), 4).is_none());
+    }
+
+    #[test]
+    fn a_line_cut_inside_a_unit_is_read_whole() {
+        let line = units_line(500, Some(321));
+        assert!(super::parse_cut(&line, 4).is_none());
+        // Large enough to be cut, and read whole when the cut fails.
+        let large = units_line(20_000, Some(12_345));
+        assert!(large.len() >= super::PARALLEL_BYTES);
+        let read = super::parse_units(&large, 4).expect("the line reads");
+        assert_eq!(read.len(), 20_000);
+        assert_eq!(read, whole(&large));
+        let plain = units_line(20_000, None);
+        assert_eq!(super::parse_units(&plain, 4).expect("the line reads"), whole(&plain));
+    }
 
     /// The types of the symbols named `name` anywhere in `value`.
     fn symbol_types(value: &Value, name: &str, out: &mut Vec<String>) {
