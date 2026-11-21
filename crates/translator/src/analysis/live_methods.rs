@@ -201,6 +201,8 @@ fn walk(
     values: &ObjectValues,
     fast: bool,
 ) -> Result<Option<LiveMethods>, String> {
+    // A walk finds whether the analysis followed a method on a class by a binary search.
+    assert!(values.contexts.iter().all(|c| c.is_sorted()), "a method's contexts are in ascending order");
     let walk = Walk {
         class,
         values,
@@ -212,6 +214,7 @@ fn walk(
         initializers: methods_by_type(class, |m| class.is_initializer(m)),
         constructors: methods_by_type(class, |m| class.methods[m].is_ctor),
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
+        enums: RefCell::default(),
         stop: Stop::new(class, code),
         state: RefCell::new(State {
             work: Vec::new(),
@@ -475,7 +478,13 @@ impl Walk<'_> {
         }
         let memos = {
             let main = std::mem::take(&mut *self.memos.borrow_mut());
-            Memos { targets: main.targets, lists: main.lists, concretes: main.concretes, ..Memos::default() }
+            Memos {
+                targets: main.targets,
+                lists: main.lists,
+                concretes: main.concretes,
+                catches: main.catches,
+                ..Memos::default()
+            }
         };
         let known = std::mem::take(&mut self.state.borrow_mut().known);
         let main = self.state.borrow();
@@ -490,6 +499,7 @@ impl Walk<'_> {
             initializers: self.initializers.clone(),
             constructors: self.constructors.clone(),
             index: self.index.clone(),
+            enums: RefCell::new(std::mem::take(&mut *self.enums.borrow_mut())),
             stop: Stop::default(),
             state: RefCell::new(State {
                 work: Vec::new(),
@@ -667,12 +677,17 @@ struct Walk<'a> {
     /// The constructors of each type, in index order.
     constructors: Vec<Vec<usize>>,
     index: FastMap<&'a str, usize>,
+    /// The enum, if any, that each name of a class in a `Type` names, by the name's address and
+    /// length (`Walk::enum_named`): each walk looks it up for every expression of a class type,
+    /// and a type names its class with a string kept for good (`interned_name`), so that this
+    /// hashes two words rather than the name.
+    enums: RefCell<FastMap<(usize, usize), Option<usize>>>,
     stop: Stop,
     state: RefCell<State>,
-    /// What the points-to facts, which do not change during the walk, answer: the methods that
-    /// each call runs on each object, and the concrete classes below each type. A method is walked
-    /// again whenever what it relies on changes, and a call on a receiver that may be any class
-    /// runs thousands of methods.
+    /// What the points-to facts and the code, which do not change during the walk, answer: the
+    /// methods that each call runs on each object, the concrete classes below each type, and
+    /// whether a method has a `catch` clause. A method is walked again whenever what it relies on
+    /// changes, and a call on a receiver that may be any class runs thousands of methods.
     memos: RefCell<Memos>,
 }
 
@@ -721,6 +736,8 @@ struct Memos {
     concretes: FastMap<usize, Rc<[usize]>>,
     /// The classes of each list of `lists`, by its address (`Walk::classes`).
     classes: FastMap<usize, ClassSet>,
+    /// Whether each method that was asked about has a `catch` clause (`Walk::dead_catches`).
+    catches: FastMap<usize, bool>,
     /// What each call passed when it last ran all its targets, by call and list of targets
     /// (`Walk::call`).
     passed: FastMap<(ExprId, usize), Passed>,
@@ -868,7 +885,7 @@ impl Walk<'_> {
             return;
         }
         // The facts of a method are for the objects that the analysis followed it on.
-        if !self.values.contexts[m].contains(&ctx) && state.unknown.is_none() {
+        if self.values.contexts[m].binary_search(&ctx).is_err() && state.unknown.is_none() {
             let on = self.class.types.get(ctx).map_or("no object", |d| d.name.as_str());
             let name = format!("{}.{}", self.class.types[method.class].name, method.name);
             state.unknown = Some(format!("`{name}` run on {on}"));
@@ -965,6 +982,10 @@ impl Walk<'_> {
     /// (see the module's comment), which cannot run; the method waits for each type they catch.
     fn dead_catches(&self, m: usize) -> FastSet<ExprId> {
         let mut dead = FastSet::default();
+        // Most methods have none, and the walk that finds them goes over the whole body.
+        if !self.has_catches(m) {
+            return dead;
+        }
         let mut waiting = Vec::new();
         {
             let state = self.state.borrow();
@@ -992,6 +1013,21 @@ impl Walk<'_> {
         dead
     }
 
+    /// Whether method `m` has a `catch` clause (remembered).
+    fn has_catches(&self, m: usize) -> bool {
+        if let Some(&found) = self.memos.borrow().catches.get(&m) {
+            return found;
+        }
+        let mut found = false;
+        for s in &self.class.methods[m].body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                found |= matches!(s, Stmt::Try { catches, .. } if !catches.is_empty())
+            });
+        }
+        self.memos.borrow_mut().catches.insert(m, found);
+        found
+    }
+
     /// The statements of method `m` that the runtime sees an object in: a `throw`.
     fn statement(&self, m: usize, ctx: usize, s: &Stmt) {
         if let Stmt::Throw(e) = s {
@@ -1003,6 +1039,17 @@ impl Walk<'_> {
     /// for both in an initializer), runs.
     fn code(&self, m: usize, ctx: usize, e: &Expr) {
         visit_expr(e, &mut |x| self.expr(m, ctx, x));
+    }
+
+    /// The enum named `name`, the name of a class in a `Type` (`Walk::enums`).
+    fn enum_named(&self, name: &'static str) -> Option<usize> {
+        let key = (name.as_ptr() as usize, name.len());
+        if let Some(&t) = self.enums.borrow().get(&key) {
+            return t;
+        }
+        let t = self.index.get(name).copied().filter(|&t| self.class.types[t].kind == TypeKind::Enum);
+        self.enums.borrow_mut().insert(key, t);
+        t
     }
 
     /// What the expression `x` itself runs, not counting the expressions inside it.
@@ -1083,8 +1130,7 @@ impl Walk<'_> {
         }
         // An enum's objects are its constants, which its static initialization makes.
         if let Type::Enum(name) | Type::Class(name, _) = x.ty
-            && let Some(&t) = self.index.get(name)
-            && self.class.types[t].kind == TypeKind::Enum
+            && let Some(t) = self.enum_named(name)
         {
             self.initialize(t);
         }
