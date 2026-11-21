@@ -147,15 +147,25 @@ made on the stack (`java::count_allocation`).
     inlined.
   - `"0123456789".contains(current)` searches for one byte without checking first that the text
     is UTF-8 (`Wtf8::find_from`).
-- **Elements of an object array read again (NBody 1.0x, ParticleArray 0.6x).** Consecutive
-  statements that read the same element, with an array that is a local, a field of `this` or a
-  static and an index that is a local or a constant, read it once into a local, when none of
-  those statements assigns the array, the index, or an element of any object array, and none of
-  them calls a method (`lower/element_reads.rs`). The local is declared without `mut` when it is
-  assigned once. A primitive field of a local's object or of `this` is read once the same way,
-  when none of the statements assigns the local or a field of that name of any object and no
-  class has a volatile field of that name: `bj.mass`, read after each store to `bi.vx`, which
-  Rust's compiler could not tell from a store to `bj.mass`.
+- **Elements and fields read again (NBody 1.0x, ParticleArray 0.6x).** A method that reads the
+  same element or field again where nothing between could change it reads it once into a local,
+  as Java's JIT does (`lower/element_reads.rs`): an element of an object array that is a local,
+  a field of `this` or a static, at an index that is a local or a constant; and a field of a
+  local's object or of `this` that is not `final`: a primitive one, such as `bj.mass`, read after
+  each store to `bi.vx`, which Rust's compiler could not tell from a store to `bj.mass`, or an
+  object, enum or string field, such as `if (this.vehicle != null) this.vehicle.turn(..)`,
+  whose two atomic loads of a shared field the compiler never merges, each tested for null. When
+  the first read is the first thing its statement evaluates, it is a statement of its own before it
+  (`this_vehicle = this.vehicle;`), so the test is of a local, which the generated code narrows;
+  otherwise it is an assignment in its place. A store to a primitive field is read back from the
+  stored value (`this.seed = this.seed * 3 + 7; return this.seed >> 2;`). The walk follows `if`
+  branches, early returns and the parts of `&&`, `||` and `?:` in Java's order of evaluation,
+  and forgets what it has read at a call (after its receiver and arguments), an object creation,
+  a library method other than a few of `Math`'s, a volatile read or store, the first use of
+  another class's static, a store to a field of that name, and at loops and `try` statements,
+  whose parts it walks on their own. Java's memory model allows it: no other thread's store can
+  be ordered between two reads with no synchronization between them. A local is declared without
+  `mut` when one statement of its block assigns it once.
 - **Fields that a loop only reads (NBody).** Java's compiler keeps `bi.x` in a register through
   NBody's inner loop, as it tells fields apart by name; Rust's reads it again at every turn,
   since the store to `bj.vx`, a cell of an object it knows nothing of, might be one to `bi.x`. A

@@ -306,7 +306,17 @@ impl<'a> Gen<'a> {
             n
         };
         let assigns_once = |s: &Stmt| match s {
-            Stmt::Local { init: Some(e), .. } | Stmt::Expr(e) => count(e) == 1,
+            Stmt::Local { init: Some(e), .. }
+            | Stmt::Expr(e)
+            | Stmt::Return(Some(e), _)
+            | Stmt::Throw(e)
+            | Stmt::Yield(e) => count(e) == 1,
+            // In the condition, and in neither branch (`lower/element_reads.rs`).
+            Stmt::If { cond, then, otherwise } => {
+                count(cond) == 1
+                    && !assigns_stmt(then, name)
+                    && otherwise.as_deref().is_none_or(|o| !assigns_stmt(o, name))
+            }
             _ => false,
         };
         // A switch whose cases do not fall into the next, each assigning it once at most, in

@@ -234,7 +234,7 @@ fn method_messages(
             _ => {}
         });
     }
-    // The locals that hold an element that a run of statements reads more than once
+    // The locals that hold an element or a field that a method reads more than once
     // (`lower/element_reads.rs`): declared where the first read is, which becomes
     // `(name = element)` there.
     let mut elements = FastMap::default();
@@ -244,7 +244,7 @@ fn method_messages(
             &mut |e| {
                 visit_expr(e, &mut |x| {
                     if let ExprKind::Assign { op: None, target: Place::Var(name), value } = &x.kind
-                        && matches!(value.kind, ExprKind::Index(..))
+                        && matches!(value.kind, ExprKind::Index(..) | ExprKind::Field { .. })
                         && uninitialized.get(name.as_str()).is_some_and(|&p| p == x.pos && p == value.pos)
                     {
                         elements.insert(name.as_str(), &**value);
