@@ -8159,9 +8159,9 @@ fn a_field_assigned_from_a_borrow_of_itself_ends_the_borrow_first() {
         class M { public static void main(String[] x) { Chain c = new Chain(); c.add(1); c.add(2);
             System.out.println(c.pop() + c.pop()); } }",
     );
-    // The old head's `next` is copied out of its cell, so nothing borrowed outlives the read
-    // when the field is written.
-    assert_contains(&rust, &["self.head = java::non_null(self.head.as_ref()).next.get();"]);
+    // The old head is read once into a local, whose `next` is copied out of its cell, so nothing
+    // borrowed outlives the read when the field is written.
+    assert_contains(&rust, &["self.head = java::non_null(this_head.as_ref()).next.get();"]);
 }
 
 #[test]
@@ -8961,6 +8961,100 @@ fn an_inherited_small_body_called_on_an_object_of_one_class_runs_its_copy_for_th
     );
     assert_contains(&rust, &["__is_empty__on_colls_multi(", "fn CollsColl__is_empty__on_colls_multi("]);
     assert_lacks(&rust, &["__on_colls_one", "__on_colls_five"]);
+}
+
+#[test]
+fn a_field_tested_for_null_is_read_once_for_its_uses() {
+    let rust = translate(
+        "class A {
+            A next;
+            A last;
+            int value;
+            int follow() {
+                if (this.next != null) {
+                    return this.next.value + this.next.value;
+                }
+                return 0;
+            }
+            int lead() {
+                if (this.last == null) {
+                    return -1;
+                }
+                return this.last.value * 2;
+            }
+            public static void main(String[] args) {
+                A a = new A();
+                a.next = new A();
+                a.next.value = 4;
+                System.out.println(a.follow() + a.lead());
+                a.last = a.next;
+                System.out.println(a.follow() + a.lead());
+            }
+        }",
+    );
+    // The field is read into a local in a statement before the test, which tests the local; the
+    // branch and the code after an early return read the local; nothing reads the field again.
+    for local in ["this_next = ", "this_last = "] {
+        assert!(
+            rust.lines().any(|l| l.trim_start().starts_with(local) && l.ends_with(';')),
+            "no statement `{local}..;` in:\n{rust}"
+        );
+    }
+    assert_lacks(&rust, &["this.next.get().is_some()"]);
+}
+
+#[test]
+fn a_stored_field_is_read_back_from_the_stored_value() {
+    let rust = translate(
+        "class A {
+            int seed = 1;
+            int roll() {
+                this.seed = this.seed * 3 + 7;
+                return this.seed >> 2;
+            }
+            public static void main(String[] args) {
+                A a = new A();
+                System.out.println(a.roll() + a.roll());
+            }
+        }",
+    );
+    assert_contains(&rust, &["this_seed = "]);
+}
+
+#[test]
+fn a_field_is_read_again_after_a_call_a_volatile_read_or_when_final() {
+    let rust = translate(
+        "class A {
+            A next;
+            final A head;
+            int value;
+            volatile boolean ready;
+            A(A head) { this.head = head; }
+            void touch() { value++; }
+            int afterCall() {
+                this.next.touch();
+                return this.next.value;
+            }
+            int afterVolatile(A o) {
+                int a = o.value;
+                boolean r = o.ready;
+                int b = o.value;
+                return r ? a + b : a - b;
+            }
+            int ofFinal() {
+                return this.head.value + this.head.value;
+            }
+            public static void main(String[] args) {
+                A a = new A(new A(null));
+                a.next = a.head;
+                a.ready = true;
+                System.out.println(a.afterCall() + a.afterVolatile(a.next) + a.ofFinal());
+            }
+        }",
+    );
+    // The call may change `next`; the volatile read of `ready` orders the second read of
+    // `o.value` after it; `head` is final, read in place.
+    assert_lacks(&rust, &["this_next", "o_value", "this_head"]);
 }
 
 #[test]

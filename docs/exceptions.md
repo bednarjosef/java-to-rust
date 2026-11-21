@@ -734,8 +734,8 @@ value javac keeps; `[...]` for `++this.i` and a compound assignment) or a call, 
 no `because` for the value of `c ? a : b`, an unboxing as the call of the box's method that javac
 writes (`java.lang.Integer.intValue()`, also for a wider primitive; a `++w` names its local where
 the update starts, which `BytecodeNames` notes), no message for a pattern switch's
-`Objects.requireNonNull`, an element that lowering reads once for several reads of it (`lower/element_reads.rs`)
-as the element, and an assigned value followed back to its source, whatever it is
+`Objects.requireNonNull`, an element or field that lowering reads once for several reads of it
+(`lower/element_reads.rs`) as the element or field, and an assigned value followed back to its source, whatever it is
 stored in (`(s = a).next` fails `because "a" is null`, `(this.f = g()).next` `because the return
 value of "Main.g()" is null`). A call is named as javac wrote it where the
 translation answers it with code of its own: `c.getModule()` as `java.lang.Class.getModule()`
