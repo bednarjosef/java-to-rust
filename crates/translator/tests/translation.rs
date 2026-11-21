@@ -6074,16 +6074,18 @@ fn interface_statics_are_free_functions_and_consts() {
 #[test]
 fn an_enum_constant_implements_an_interface() {
     let rust = translate(INTERFACES);
-    // The variant holds the constant itself, which is `Copy`; equal constants are the same.
+    // The variant holds the constant itself, which is `Copy`; equal constants are the same, with
+    // the same bits, so `Shape`'s `eq` compares the bits alone.
     assert_contains(
         &rust,
         &[
             "    Color(&'a Color) = 6,",
-            "(ShapeView::Color(a), ShapeView::Color(b)) => a == b,",
+            "impl PartialEq for Shape {\n    fn eq(&self, other: &Shape) -> bool {\n        self.0 == other.0\n    }",
             "let c = Shape::Color(Color::Blue);",
             "    fn area(self) -> f64 {",
         ],
     );
+    assert_lacks(&rust, &["eq_by_value"]);
 }
 
 #[test]
@@ -8314,6 +8316,85 @@ fn a_default_body_on_receivers_of_known_classes_runs_their_copies() {
         ],
     );
     assert_lacks(&rust, &["__on_known_chunk", "__on_known_fixed", "__on_known_imposter"]);
+}
+
+#[test]
+fn objects_equal_by_their_bits_need_no_compare_by_value() {
+    // A Java enum's constant is equal to another value only when their bits are, as an object of
+    // a class is, so `Object`'s `eq` looks further only for a string, and tests for it inline
+    // (corpus/features/EnumConstantsAsObjects.java runs this).
+    let rust = translate(
+        r#"
+        public class Values {
+            enum Color { RED, GREEN }
+            static final class Box { }
+            static int same(Object[] all, Object x) {
+                int n = 0;
+                for (Object y : all) {
+                    if (y == x) n++;
+                }
+                return n;
+            }
+            public static void main(String[] args) {
+                Box box = new Box();
+                Object[] all = { Color.RED, Color.GREEN, "s", box, Color.RED };
+                System.out.println(same(all, Color.RED) + " " + same(all, box) + " " + same(all, new Box()));
+            }
+        }
+    "#,
+    );
+    let eq = &rust[rust.find("impl PartialEq for Object {").expect("`Object` has an `eq`")..];
+    let eq = &eq[..eq.find("_ => false,").expect("`eq_by_value` compares strings")];
+    assert_contains(
+        eq,
+        &[
+            "self.0 == other.0 || self.0.tag() == other.0.tag() && matches!(self.0.tag(), ",
+            "(ObjectView::String(a), ObjectView::String(b)) => a == b,",
+        ],
+    );
+    assert_lacks(eq, &["Color"]);
+}
+
+#[test]
+fn an_inherited_small_body_called_on_an_object_of_one_class_runs_its_copy_for_that_class() {
+    // `Section.isEmpty` calls `isEmpty` on a `Multi`, which inherits it from `Coll` with five
+    // other classes, more than a body is copied for: the call runs the copy for `Multi`, in which
+    // `size()` is `Multi`'s, and no other class gets a copy.
+    let rust = translate(
+        r#"
+        public class Colls {
+            static abstract class Coll {
+                abstract int size();
+                boolean isEmpty() { return size() == 0; }
+            }
+            static final class Multi extends Coll { int n; int size() { return n; } }
+            static final class One extends Coll { int size() { return 1; } }
+            static final class Two extends Coll { int size() { return 2; } }
+            static final class Three extends Coll { int size() { return 3; } }
+            static final class Four extends Coll { int size() { return 4; } }
+            static final class Five extends Coll { int size() { return 5; } }
+
+            static final class Section {
+                final Multi storage = new Multi();
+                boolean isEmpty() { return storage.isEmpty(); }
+            }
+
+            public static void main(String[] args) {
+                Coll[] all = { new Multi(), new One(), new Two(), new Three(), new Four(), new Five() };
+                int empty = 0;
+                for (Coll c : all) {
+                    if (c.isEmpty()) empty++;
+                }
+                Section s = new Section();
+                System.out.println(empty + " " + s.isEmpty());
+                s.storage.n = 2;
+                System.out.println(s.isEmpty());
+            }
+        }
+    "#,
+    );
+    assert_contains(&rust, &["__is_empty__on_colls_multi(", "fn CollsColl__is_empty__on_colls_multi("]);
+    assert_lacks(&rust, &["__on_colls_one", "__on_colls_five"]);
 }
 
 #[test]

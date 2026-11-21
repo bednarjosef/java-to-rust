@@ -549,12 +549,14 @@ Record patterns and patterns in `switch` are `if let` chains over the selector's
 constant (constants are singletons), `false` across variants. Two values with the same bits
 (class number and address, or a value held in the low bits) are always equal, and a variant
 compared by identity is equal only then, so the `eq` of an enum whose variants are all compared
-by identity is `self.0 == other.0`; one with variants compared by value (a string or a box held
-as a value) compares the bits first and looks through the view only for those. That `eq` is
-inlined where `==` is: equal bits are equal and two classes are not, and only two values of one
-class with different bits call `eq_by_value`, which tests the class among those compared by value
-(900 on the Minecraft server) and compares them, in a body crate of a split program
-(docs/several-crates.md), where the whole test was too large for the link's inlining. `==` on enum
+by identity is `self.0 == other.0`, and so is a variant whose equal values have equal bits (a
+Java enum's constant, a `Boolean` or a `Byte` held in the low bits). One with variants compared
+by value whose equal values may have different bits (a string, another box or a builder held as
+a value) compares the bits first and looks through the view only for those. That `eq` is inlined
+where `==` is: equal bits are equal, two classes are not, and the test of the class among the
+few compared by value is a few ranges of numbers; only two values of one of those classes with
+different bits call `eq_by_value`, which compares them, in a body crate of a split program
+(docs/several-crates.md). `==` on enum
 values is `&a == &b`, and with a value that may be null `a.as_ref() == Some(&b)`. Plain handles
 keep `Arc::ptr_eq` and `java::same`. An operand that erasure casts back from one enum to another
 (`Class::erased_casts`: an element of a `Property[]` that is an `Object[]`, or a generic member's

@@ -4125,11 +4125,16 @@ impl<'a> Gen<'a> {
     /// (`same_variant`) look further, through the view.
     fn identity_impl(&mut self, t: usize, variants: &[usize]) {
         let name = struct_name(&self.class.types[t].name);
-        let by_value: Vec<(usize, String)> = variants
-            .iter()
-            .map(|&c| (c, self.same_variant(c)))
-            .filter(|(_, same)| same != IDENTITY)
-            .collect();
+        // A variant compared by value whose two values are equal exactly when their bits are (a
+        // Java enum's constant, or a `Boolean` or `Byte` held in the low bits, `same_by_bits`)
+        // needs no look further either.
+        let mut by_value: Vec<(usize, String)> = Vec::new();
+        for &c in variants {
+            let same = self.same_variant(c);
+            if same != IDENTITY && !self.same_by_bits(c) {
+                by_value.push((c, same));
+            }
+        }
         self.gap();
         self.line(&format!("impl PartialEq for {name} {{"));
         self.indent += 1;
@@ -4141,14 +4146,19 @@ impl<'a> Gen<'a> {
                 false => self.line("self.0 == other.0"),
             }
         } else {
-            // Values with the same bits are equal, and values of two classes are not: both tests
-            // are inlined where `==` is, and only two values of one class with different bits go
-            // on to `eq_by_value`, which compares those of the classes held as values. The split
-            // puts a small function in the header, which every crate inlines, and the long test
-            // of the class (900 classes on the Minecraft server) in a body crate.
+            // Values with the same bits are equal, and values of two classes are not: those tests
+            // and the test of the class among the few compared by value (strings, boxes and
+            // builders) are inlined where `==` is, and only two values of one of those classes
+            // with different bits go on to `eq_by_value`, which compares them. The split puts the
+            // small function in the header, which every crate inlines, and the compare in a body
+            // crate.
+            let classes: Vec<usize> = by_value.iter().map(|&(c, _)| c).collect();
+            let tags = self.tags(&classes, variants);
             self.line("#[inline]");
             self.line(&format!("fn eq(&self, other: &{name}) -> bool {{"));
-            self.line("    self.0 == other.0 || self.0.tag() == other.0.tag() && self.eq_by_value(other)");
+            self.line(&format!(
+                "    self.0 == other.0 || self.0.tag() == other.0.tag() && matches!(self.0.tag(), {tags}) && self.eq_by_value(other)"
+            ));
             self.line("}");
             self.indent -= 1;
             self.line("}");
@@ -4157,11 +4167,7 @@ impl<'a> Gen<'a> {
             self.indent += 1;
             self.line(&format!("fn eq_by_value(&self, other: &{name}) -> bool {{"));
             self.indent += 1;
-            let tags: Vec<String> = by_value.iter().map(|&(c, _)| self.class_tag(c).to_string()).collect();
-            self.line(&format!(
-                "matches!(self.0.tag(), {}) && match (self.view(), other.view()) {{",
-                tags.join(" | ")
-            ));
+            self.line("match (self.view(), other.view()) {");
             self.indent += 1;
             for (c, same) in by_value {
                 let (v, a, b) =
