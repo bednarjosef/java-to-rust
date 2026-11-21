@@ -185,11 +185,148 @@ pub fn closure_types(class: &Class) -> FastSet<usize> {
     candidates
 }
 
+/// The closure parameters, as (method, parameter) indexes among the borrowed object parameters
+/// (`borrowed`), that the method only calls and lends on: every use of one is a call of its
+/// type's method on it or an argument of another such parameter, through casts to the closure
+/// types it is one of. Nothing keeps such a closure past the call, so the parameter is a
+/// `&dyn Fn(..)` (an `Option` of one where it may be null) that the caller lends, and a lambda
+/// passed to it is a closure on the caller's stack, with no `Rc`. A closure that another
+/// closure captures or that anything stores is not lent; neither is a parameter of a
+/// constructor or of a lambda's own method, which is the closure's. The methods of an override
+/// group take a parameter alike, so it is lent in all of them or in none.
+pub fn lent_closures(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    borrowed: &FastSet<(usize, usize)>,
+) -> FastSet<(usize, usize)> {
+    let closure_of = |ty: Type| class.class_index(ty).filter(|t| closure_types.contains(t));
+    let mut lent: FastSet<(usize, usize)> = (borrowed.iter().copied())
+        .filter(|&(m, i)| {
+            let method = &class.methods[m];
+            let c = method.class;
+            !method.is_ctor
+                && !closure_types.contains(&c)
+                && !matches!(class.types[c].origin, Origin::Lambda { .. })
+                && closure_of(method.params[i].ty).is_some()
+                && !assigns(&method.body, &method.params[i].name)
+        })
+        .collect();
+    loop {
+        let losing: Vec<(usize, usize)> = (lent.iter().copied())
+            .filter(|&(m, i)| {
+                let method = &class.methods[m];
+                !only_called(class, closure_types, &method.body, &method.params[i].name, &lent)
+            })
+            .collect();
+        for p in &losing {
+            lent.remove(p);
+        }
+        if !super::align_groups(class, &mut lent) && losing.is_empty() {
+            break;
+        }
+    }
+    lent
+}
+
+/// Whether `stmts` assign the variable `name`, which a lent parameter, a borrow, cannot take.
+fn assigns(stmts: &[Stmt], name: &str) -> bool {
+    let mut found = false;
+    for s in stmts {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    found |= matches!(&x.kind, ExprKind::Assign { target: Place::Var(v), .. } if v == name);
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    found
+}
+
+/// Whether every use of the closure variable `name` in `stmts` is a call of its type's method on
+/// it, or an argument of a parameter of `lent`.
+fn only_called(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    stmts: &[Stmt],
+    name: &str,
+    lent: &FastSet<(usize, usize)>,
+) -> bool {
+    let mut uses = Vec::new();
+    let mut allowed = FastSet::default();
+    for s in stmts {
+        visit_stmt(
+            s,
+            &mut |e| {
+                visit_expr(e, &mut |x| {
+                    if let ExprKind::Var(v) = &x.kind
+                        && v == name
+                    {
+                        uses.push(x.id);
+                    }
+                    allowed.extend(called_or_lent(class, closure_types, x, name, lent));
+                })
+            },
+            &mut |_| {},
+        );
+    }
+    uses.iter().all(|id| allowed.contains(id))
+}
+
+/// The reads of the closure variable `name` that `x` calls the closure of, as its receiver, or
+/// passes as an argument of a parameter of `lent`.
+fn called_or_lent(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    x: &Expr,
+    name: &str,
+    lent: &FastSet<(usize, usize)>,
+) -> Vec<ExprId> {
+    let mut out = Vec::new();
+    if let ExprKind::MethodCall { receiver, resolved: Some(r), .. } = &x.kind
+        && let ExprKind::Var(v) = &receiver.kind
+        && v == name
+        && let Some(t) = class.class_index(receiver.ty)
+        && closure_types.contains(&t)
+        && *r == closure_method(class, t)
+    {
+        out.push(receiver.id);
+    }
+    if let ExprKind::Call { args, resolved: Some(callee), .. }
+    | ExprKind::MethodCall { args, resolved: Some(callee), .. } = &x.kind
+    {
+        for (j, a) in args.iter().enumerate() {
+            if lent.contains(&(*callee, j)) {
+                out.extend(closure_read(a, name, closure_types, class));
+            }
+        }
+    }
+    out
+}
+
+/// The `Var` node inside `e` when `e` reads the variable `name`, through casts to closure types.
+fn closure_read(e: &Expr, name: &str, closure_types: &FastSet<usize>, class: &Class) -> Option<ExprId> {
+    match &e.kind {
+        ExprKind::Var(v) if v == name => Some(e.id),
+        ExprKind::Cast(to, inner) if class.class_index(*to).is_some_and(|t| closure_types.contains(&t)) => {
+            closure_read(inner, name, closure_types, class)
+        }
+        _ => None,
+    }
+}
+
 /// The locals of closure types, by method and name, that are only called: each declaration of
 /// the name in the method has a lambda converted to its type as its initializer, and every other
-/// use of it is a call of its type's method on it. Nothing else holds such a closure, so it is a
-/// plain Rust closure that the method owns, with no `Rc`.
-pub fn closure_locals(class: &Class, closure_types: &FastSet<usize>) -> FastSet<(usize, String)> {
+/// use of it is a call of its type's method on it or an argument of a lent closure parameter
+/// (`lent_closures`). Nothing else holds such a closure, so it is a plain Rust closure that the
+/// method owns, with no `Rc`.
+pub fn closure_locals(
+    class: &Class,
+    closure_types: &FastSet<usize>,
+    lent: &FastSet<(usize, usize)>,
+) -> FastSet<(usize, String)> {
     let mut out = FastSet::default();
     for (index, m) in class.methods.iter().enumerate() {
         // Per name: whether every declaration qualifies, and the uses that are calls.
@@ -208,35 +345,22 @@ pub fn closure_locals(class: &Class, closure_types: &FastSet<usize>) -> FastSet<
         if declared.is_empty() {
             continue;
         }
-        let mut uses: FastMap<String, usize> = FastMap::default();
-        let mut calls: FastMap<String, usize> = FastMap::default();
         let mut assigned: FastSet<String> = FastSet::default();
         for s in &m.body {
             visit_stmt(
                 s,
                 &mut |e| {
-                    visit_expr(e, &mut |x| match &x.kind {
-                        ExprKind::Var(name) => *uses.entry(name.clone()).or_default() += 1,
-                        ExprKind::MethodCall { receiver, resolved: Some(r), .. } => {
-                            if let ExprKind::Var(name) = &receiver.kind
-                                && let Some(t) = class.class_index(receiver.ty)
-                                && closure_types.contains(&t)
-                                && *r == closure_method(class, t)
-                            {
-                                *calls.entry(name.clone()).or_default() += 1;
-                            }
-                        }
-                        ExprKind::Assign { target: Place::Var(name), .. } => {
+                    visit_expr(e, &mut |x| {
+                        if let ExprKind::Assign { target: Place::Var(name), .. } = &x.kind {
                             assigned.insert(name.clone());
                         }
-                        _ => {}
                     })
                 },
                 &mut |_| {},
             );
         }
         for name in declared.keys() {
-            if !assigned.contains(name) && uses.get(name) == calls.get(name) {
+            if !assigned.contains(name) && only_called(class, closure_types, &m.body, name, lent) {
                 out.insert((index, name.clone()));
             }
         }

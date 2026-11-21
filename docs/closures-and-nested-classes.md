@@ -445,14 +445,25 @@ so a `UnaryOperator` is passed where a `Function` is taken. The argument and res
 those of the interface's method as its dispatcher would take them (`Fn(&java::Wtf8) -> i32` for a
 borrowed string parameter, `-> Result<_, Throwable>` when the method throws).
 
-- **Stored form** (parameters, fields, statics, array elements, returns): `Rc::new(closure) as
-  IntOp`, so every place gets the alias's type without an annotation. A parameter is `&IntOp`,
-  as the borrowing analysis lends objects.
+- **Stored form** (fields, statics, array elements, returns, and the parameters that are not
+  lent): `Rc::new(closure) as IntOp`, so every place gets the alias's type without an
+  annotation. Such a parameter is `&IntOp`, as the borrowing analysis lends objects.
+- **Lent form**: a parameter that the method only calls and passes on to other lent parameters
+  (never assigns, stores, captures in another lambda, returns or uses with a default method;
+  `Facts::lent_closures`) is `&dyn Fn(i32, i32) -> i32`, or `Option<&dyn Fn(..)>` where it may be
+  null, with no `Send + Sync` even for a closure type that threads share, since the closure runs
+  on the thread that lends it. The methods of an override group take it alike, so it is lent in
+  all of them or in none; a constructor's parameters and a lambda's own are never lent. A lambda
+  passed to it is the closure itself, made on the caller's stack and lent,
+  `each(n, &(|v: i32| { .. }))`, so evaluating it allocates nothing and drops no `Rc`; it
+  borrows its captures as a local closure does. A lent parameter or a local closure is passed as
+  it is, `null` as `None`, and a stored closure as a borrow of what its handle holds
+  (`&**(&op)`, `(&op).as_deref()`), so both forms meet at one call.
 - **Local form**: a local whose every declaration has a lambda as its initializer and that is
-  only called (never assigned, captured, passed, returned or used with a default method;
-  `Facts::closure_locals`) is the closure itself, `let f = |x: i32| -> i32 { .. };`. It borrows
-  what it captures when each capture is a local or a clone of one (`this` included), and moves
-  its captures in otherwise.
+  only called and passed to lent parameters (never assigned, captured, otherwise passed,
+  returned or used with a default method; `Facts::closure_locals`) is the closure itself,
+  `let f = |x: i32| -> i32 { .. };`, lent as `&f`. It borrows what it captures when each capture
+  is a local or a clone of one (`this` included), and moves its captures in otherwise.
 
 The closure is written where the lambda is created: the lambda class's method is generated
 inside the creating expression with its own names and facts, and its capture fields become
@@ -608,12 +619,14 @@ constant whose enum implements `Iterable`.
 
 Plans, each a refinement of a correct form that exists:
 
-- **Parameter form `impl FnMut(A) -> R`**: a parameter that is only called (or passed to such a
-  parameter) taking the lambda inline, with a lambda capturing `this` borrowing `self` (Rust
-  2021 captures the field `self.total` alone, so it does not conflict with other borrows of the
-  same statement). A method that wraps its function parameter into a new lambda and recurses
-  would instantiate itself without end; it needs `&mut dyn FnMut` instead. Today such
-  parameters are `&Op`.
+- **Lambdas that capture a lent parameter**: a lambda that captures a closure parameter (the
+  server's `getEntities` wraps its consumer in the lambda it passes on) makes that parameter a
+  stored one today. Where the capturing lambda is itself lent, it could borrow the lent
+  closure, `&dyn Fn` inside `&dyn Fn`, and the outer parameter stay lent.
+- **Parameter form `impl Fn(A) -> R`**: a lent parameter as a generic, so that the helper is
+  instantiated per lambda and LLVM can inline the closure's body into the helper's loop. A
+  method that wraps its function parameter into a new lambda and recurses would instantiate
+  itself without end, so it keeps `&dyn Fn`.
 - **Closure types per instantiation**: `Function<Integer, Integer>` as `Rc<dyn Fn(i32) -> i32>`
   at a fully parameterized site, with a bridging closure where it meets an erased one, so a
   program's own lambdas stay typed when handed to erased JDK code. Today the closure type is
@@ -651,7 +664,7 @@ Plans, each a refinement of a correct form that exists:
 | `lower/constant_bodies.rs` | enum constant bodies |
 | `lower/foreach.rs` | for-each over `Iterable` |
 | `lower/hierarchy.rs` | `o.super(..)` and `Outer.super.m()` |
-| `analysis/closures.rs` | which interfaces are closure types; closure locals |
+| `analysis/closures.rs` | which interfaces are closure types; lent closure parameters; closure locals |
 | `codegen/closures.rs` | aliases, closures, calls, extension traits, `Rc` or `Arc` |
 
 Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMemberClasses`,
@@ -660,5 +673,5 @@ Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMem
 `LambdaMadeOnce`, `LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
 `ClosureForms`, `LocalClosures`, `ClosureDefaultMethods`, `GenericClosures`), and in
 `corpus/whole-program/` (`FunctionChains`, `Comparators`, `ReverseOrder`,
-`LambdasInConstantBodies`, `ConstantBodyFieldLambdas`, `LambdaPlaceObjects`), which run only with
-the JDK's sources.
+`LambdasInConstantBodies`, `ConstantBodyFieldLambdas`, `LambdaPlaceObjects`, `LentClosures`),
+which run only with the JDK's sources.

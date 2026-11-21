@@ -1599,12 +1599,14 @@ fn objects_made_in_a_closure_s_body_are_on_the_closure_s_stack() {
             }
         }",
     );
-    assert_contains(
-        &rust,
-        &[
-            "Rc::new(move |i: i32| -> bool {\n        let slot_1 = java::Slot::<P>::new();",
-            "let p = slot_1.put(P__new(i, i + 1));",
-        ],
+    // `walk` only calls its visitor, so the lambda is a closure on `main`'s stack, lent to it.
+    let closure = (rust.find("walk(10, &(|i: i32| -> bool {"))
+        .unwrap_or_else(|| panic!("expected a lent lambda in:\n{rust}"));
+    let body: Vec<&str> = rust[closure..].lines().skip(1).take(2).map(str::trim).collect();
+    assert_eq!(
+        body,
+        ["let slot_1 = java::Slot::<P>::new();", "let p = slot_1.put(P__new(i, i + 1));"],
+        "in:\n{rust}"
     );
 }
 

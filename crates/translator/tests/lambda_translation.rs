@@ -184,7 +184,8 @@ fn a_lambda_moves_the_locals_it_captures_into_its_closure() {
     let rust = translate(
         "class A {
             interface Op { int apply(int a); }
-            static int run(Op op) { return op.apply(1); }
+            static Op last;
+            static int run(Op op) { last = op; return op.apply(1); }
             public static void main(String[] args) {
                 int k = 3;
                 String name = \"n\";
@@ -226,6 +227,43 @@ fn a_local_that_only_calls_its_lambda_is_a_closure_that_borrows_its_captures() {
         ],
     );
     assert_lacks(&rust, &["type AOp", "Rc::new(|", "move |"]);
+}
+
+#[test]
+fn a_closure_parameter_that_is_only_called_or_passed_on_is_lent() {
+    let rust = translate(
+        "class A {
+            interface Visitor { boolean visit(int x); }
+            interface Sink { void take(int v); }
+            interface Pick { boolean pick(int x); }
+            static Sink kept;
+            static boolean forEach(int n, Visitor v) {
+                for (int i = 0; i < n; i++) if (!v.visit(i)) return false;
+                return true;
+            }
+            static boolean passOn(int n, Visitor v) { return forEach(n, v) && forEach(n / 2, v); }
+            static void keep(Sink s) { kept = s; s.take(1); }
+            static int either(Pick v, Pick w) { if (w != null) v = w; return v.pick(1) ? 1 : 0; }
+            public static void main(String[] args) {
+                int limit = args.length + 3;
+                System.out.println(passOn(6, x -> x < limit) + \" \" + either(x -> x > 0, null));
+                keep(v -> System.out.println(v));
+                kept.take(2);
+            }
+        }",
+    );
+    // The lambda is a closure on the caller's stack, lent to `passOn`, which lends it on.
+    assert_contains(
+        &rust,
+        &[
+            "(n: i32, v: &dyn Fn(i32) -> bool) -> bool {",
+            "for_each(n, v) && for_each(n / 2, v)",
+            "pass_on(6, &(|x: i32| -> bool { x < limit }))",
+        ],
+    );
+    // A closure that the method stores, or a parameter it assigns, stays counted.
+    assert_contains(&rust, &["(s: ASink)", "Rc::new(|v: i32|"]);
+    assert_lacks(&rust, &["(v: &dyn Fn(i32) -> bool, w"]);
 }
 
 #[test]
@@ -419,7 +457,9 @@ fn an_interface_that_extends_a_closure_type_names_its_closures() {
         "import java.util.function.Function;
         import java.util.function.UnaryOperator;
         class A {
-            static String run(Function<String, String> f) { return f.apply(\"x\"); }
+            static Function<String, String> last;
+            // Stored, so that its closures keep the aliases' handle rather than being lent.
+            static String run(Function<String, String> f) { last = f; return f.apply(\"x\"); }
             public static void main(String[] args) {
                 UnaryOperator<String> twice = s -> s + s;
                 System.out.println(run(twice) + run(s -> s));
@@ -428,7 +468,7 @@ fn an_interface_that_extends_a_closure_type_names_its_closures() {
     );
     assert_contains(
         &rust,
-        &["type Function = Rc<dyn Fn(Object) -> Object>;", "type UnaryOperator = Function;", "run(&twice)"],
+        &["type Function = Rc<dyn Fn(Object) -> Object>;", "type UnaryOperator = Function;", "run(twice)"],
     );
     assert_lacks(&rust, &["enum Function", "struct UnaryOperatorLambdaInMain"]);
 }
