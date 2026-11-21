@@ -2969,11 +2969,13 @@ struct Walk<'t> {
     /// reflection hands out as `Class` values (`reflection.rs`).
     record_types: HashSet<String>,
     reflected_keys: HashSet<(String, String)>,
-    /// What the lookups of reflection keep from one search for members to the next, and the
-    /// number of classes declared so far, after which the kept classes and members start over
+    /// What the lookups of reflection keep from one search for members to the next, the number
+    /// of classes declared so far, and the classes declared again (`redeclare_units`), in the
+    /// order they were, which the kept classes and members are brought up to date with
     /// (`reflection::ReflectCache`).
     reflect_cache: reflection::ReflectCache,
     declarations: usize,
+    redeclared: Vec<String>,
     /// The service providers of the sources, and the `Class` values that `ServiceLoader.load` of
     /// reachable code loads services of (`reflection.rs`).
     providers: Vec<super::modules::ServiceProvider>,
@@ -3269,6 +3271,9 @@ impl<'t> Walk<'t> {
             .collect();
         self.work.extend(external.into_iter().map(Item::Method));
         self.reflected_keys.retain(|(class, _)| !classes.contains(class));
+        let mut redeclared: Vec<String> = classes.iter().cloned().collect();
+        redeclared.sort();
+        self.redeclared.extend(redeclared);
         let pending: HashSet<usize> = self.config_pending.iter().copied().collect();
         for index in 0..self.reflect_config.len() {
             let entry = &self.reflect_config[index];

@@ -188,13 +188,28 @@ fn candidate_bound(lookup: &Lookup) -> &str {
 /// goes into `Walk::reflected_keys`, which later calls skip, so it looks only in the classes added
 /// since, in order of name, which finds the same members in the same order as looking in all of
 /// them would. A lookup of a computed name looks in all of them again, as a new string may name
-/// another member; the names of each class's members are kept. A class declared since the cache
-/// began may be below a bound, and its members and supertypes may be found, so the cache starts
-/// over (`Walk::declarations`): once a round, as each round declares its units.
+/// another member; the names of each class's members are kept.
+///
+/// What the cache keeps of a class holds once the class and all its supertypes are declared, or
+/// are the runtime's (`outside`), which are never declared: its supertypes, whether it is below a
+/// bound and its members do not change after (`Walk::chain_of`). The cache keeps the classes it
+/// met before then (`unsettled`), with how many supertypes of theirs were known and declared.
+/// Once more classes are declared (`Walk::declarations`), each of those whose supertypes changed
+/// is looked at again as if new: checked against the bounds it was not below, and looked in again
+/// by the lookups of those it was, which find only what they did not find before
+/// (`Walk::reflected_keys`). So is a class declared again with more members (`Walk::redeclared`),
+/// whose keys `redeclare_units` took out. The cache thus lasts across the rounds, where it used to
+/// start over in each, as each round declares its units.
 #[derive(Default)]
 pub(super) struct ReflectCache {
-    /// `Walk::declarations` when the cache began.
+    /// `Walk::declarations` and the length of `Walk::redeclared` when the cache was last brought
+    /// up to date.
     declarations: usize,
+    redeclared: usize,
+    /// The classes met whose supertypes are not all known and declared yet, with how many of them
+    /// were known and declared then (`Walk::chain_of`), and those met whose supertypes are.
+    unsettled: HashMap<String, (usize, usize)>,
+    settled: HashSet<String>,
     /// The classes that the lookups without a class literal of each bound and kind look in.
     candidates: HashMap<(String, Kind), Candidates>,
     /// How many of its classes (`Candidates::order`, or its class literal) each lookup whose
@@ -219,6 +234,23 @@ struct Candidates {
     /// last were.
     checked: HashSet<String>,
     sizes: [usize; 6],
+}
+
+/// Notes a class that the cache keeps something of among the settled or the unsettled ones
+/// (`ReflectCache::unsettled`), unless it is already.
+fn note_chain(
+    walk: &Walk<'_>,
+    unsettled: &mut HashMap<String, (usize, usize)>,
+    settled: &mut HashSet<String>,
+    class: &str,
+) {
+    if settled.contains(class) || unsettled.contains_key(class) {
+        return;
+    }
+    match walk.chain_of(class) {
+        (_, true) => settled.insert(class.to_string()),
+        (chain, false) => unsettled.insert(class.to_string(), chain).is_none(),
+    };
 }
 
 /// The fields of the record `decl` that are its components: those that are not static, in order.
@@ -400,7 +432,16 @@ impl<'t> Walk<'t> {
         let mut found = Vec::new();
         let mut work = Vec::new();
         let mut seen = HashSet::new();
-        let ReflectCache { candidates, looked, supertypes, method_names, field_names, .. } = cache;
+        let ReflectCache {
+            candidates,
+            looked,
+            supertypes,
+            method_names,
+            field_names,
+            unsettled,
+            settled,
+            ..
+        } = cache;
         for lookup in &self.lookups {
             // The classes it can look in: its class literal, or those of its bound and kind.
             let group = lookup
@@ -427,7 +468,11 @@ impl<'t> Walk<'t> {
                 (None, literal) => literal.iter().skip(before).collect(),
             };
             if !computed {
-                let count = group.map_or(1, |group| group.order.len());
+                let count = match (group, &lookup.literal) {
+                    (Some(group), _) => group.order.len(),
+                    // A class literal's class is looked in again until its supertypes are settled.
+                    (None, literal) => usize::from(literal.as_deref().is_some_and(|c| self.chain_of(c).1)),
+                };
                 if before != count {
                     looked.insert(lookup.clone(), count);
                 }
@@ -533,6 +578,7 @@ impl<'t> Walk<'t> {
             for &class in classes.iter().filter(|c| self.classes.contains_key(c.as_str())) {
                 if !supertypes.contains_key(class) {
                     supertypes.insert(class.clone(), self.supertypes_of(class));
+                    note_chain(self, unsettled, settled, class);
                 }
                 let owners = &supertypes[class];
                 let names: Vec<String> = match (&lookup.name, lookup.kind) {
@@ -620,8 +666,34 @@ impl<'t> Walk<'t> {
     /// (`Walk::declarations`), and each bound and kind of a lookup without a class literal has
     /// the classes of the sets it looks in that are or extend or implement the bound.
     fn update_reflect_cache(&self, cache: &mut ReflectCache) {
-        if cache.declarations != self.declarations {
-            *cache = ReflectCache { declarations: self.declarations, ..ReflectCache::default() };
+        if cache.declarations != self.declarations || cache.redeclared != self.redeclared.len() {
+            cache.declarations = self.declarations;
+            // The classes declared again, and those whose supertypes changed, are looked at again.
+            let mut changed: BTreeSet<String> = self.redeclared[cache.redeclared..].iter().cloned().collect();
+            cache.redeclared = self.redeclared.len();
+            cache.unsettled.retain(|class, was| {
+                let (now, settled) = self.chain_of(class);
+                if now != *was {
+                    changed.insert(class.clone());
+                    *was = now;
+                }
+                if settled {
+                    cache.settled.insert(class.clone());
+                }
+                !settled
+            });
+            for class in &changed {
+                cache.supertypes.remove(class);
+                cache.method_names.remove(class);
+                cache.field_names.remove(class);
+                for group in cache.candidates.values_mut() {
+                    if group.sorted.contains(class) {
+                        group.order.push(class.clone());
+                    } else if group.checked.remove(class) {
+                        group.sizes = [usize::MAX; 6];
+                    }
+                }
+            }
         }
         let flow = |kind: Kind| self.flow_classes.get(&kind).into_iter().flatten();
         let flows: usize = self.flow_classes.values().map(BTreeSet::len).sum();
@@ -664,6 +736,7 @@ impl<'t> Walk<'t> {
             for class in sources {
                 if !group.checked.contains(class) {
                     group.checked.insert(class.clone());
+                    note_chain(self, &mut cache.unsettled, &mut cache.settled, class);
                     if self.is_subtype(class, bound) {
                         group.order.push(class.clone());
                         group.sorted.insert(class.clone());
@@ -786,6 +859,16 @@ impl<'t> Walk<'t> {
             out.insert(kind, all);
         }
         out
+    }
+
+    /// How many of the supertypes of `class` (`supertypes_of`) are known, and how many of those
+    /// are declared; and whether they are settled: each declared, or the runtime's (`outside`),
+    /// which is never declared.
+    pub(super) fn chain_of(&self, class: &str) -> ((usize, usize), bool) {
+        let chain = self.supertypes_of(class);
+        let declared = chain.iter().filter(|c| self.supertypes.contains_key(c.as_str())).count();
+        let settled = chain.iter().all(|c| self.supertypes.contains_key(c.as_str()) || super::outside(c));
+        ((chain.len(), declared), settled)
     }
 
     /// The class `class` and its supertypes, directly or not.
