@@ -452,14 +452,14 @@ impl Walk<'_> {
         if target == "java.lang.Object" {
             return true;
         }
-        let mut work = vec![class.to_string()];
+        let mut work = vec![class];
         let mut seen = std::collections::HashSet::new();
         while let Some(class) = work.pop() {
             if class == target {
                 return true;
             }
-            if seen.insert(class.clone()) {
-                work.extend(self.supertypes.get(&class).cloned().unwrap_or_default());
+            if seen.insert(class) {
+                work.extend(self.supertypes.get(class).into_iter().flatten().map(String::as_str));
             }
         }
         false

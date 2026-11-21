@@ -170,6 +170,57 @@ fn is_subtype_of_object(bound: &str) -> bool {
     bound == OBJECT
 }
 
+/// The bound of the classes that a lookup without a class literal looks in: any record's
+/// components are read, whatever the `Class` value's type says.
+fn candidate_bound(lookup: &Lookup) -> &str {
+    if lookup.kind == Kind::Record { OBJECT } else { lookup.bound.as_str() }
+}
+
+/// What `Walk::reflected_members` keeps from one call to the next (`Walk::reflect_cache`), so
+/// that a call looks only where the walk may have added something to find since the last. The
+/// walk calls it each time its work runs out, about a hundred times over the Minecraft server's
+/// rounds, and each call looked through every lookup's classes and their members again.
+///
+/// The sets of classes a lookup looks in only grow (`Walk::named`, `Walk::class_literals` and
+/// the others), so the classes of each bound are found by checking only those not checked
+/// before (`Candidates`). A lookup that spells out its name, a constructor's, or one of every
+/// member finds everything it will in a class the first time it looks there: each key it finds
+/// goes into `Walk::reflected_keys`, which later calls skip, so it looks only in the classes added
+/// since, in order of name, which finds the same members in the same order as looking in all of
+/// them would. A lookup of a computed name looks in all of them again, as a new string may name
+/// another member; the names of each class's members are kept. A class declared since the cache
+/// began may be below a bound, and its members and supertypes may be found, so the cache starts
+/// over (`Walk::declarations`): once a round, as each round declares its units.
+#[derive(Default)]
+pub(super) struct ReflectCache {
+    /// `Walk::declarations` when the cache began.
+    declarations: usize,
+    /// The classes that the lookups without a class literal of each bound and kind look in.
+    candidates: HashMap<(String, Kind), Candidates>,
+    /// How many of its classes (`Candidates::order`, or its class literal) each lookup whose
+    /// names do not depend on the strings has looked in.
+    looked: HashMap<Lookup, usize>,
+    /// The supertypes of each class looked in, itself first (`Walk::supertypes_of`).
+    supertypes: HashMap<String, Vec<String>>,
+    /// The names of the methods and of the fields of each class looked in for every member or a
+    /// computed name, with those it inherits (`Walk::member_names`).
+    method_names: HashMap<String, Vec<String>>,
+    field_names: HashMap<String, Vec<String>>,
+}
+
+/// The classes that the lookups of one bound and kind look in (`ReflectCache::candidates`).
+#[derive(Default)]
+struct Candidates {
+    /// The classes that are or extend or implement the bound, in the order found, and in order
+    /// of name.
+    order: Vec<String>,
+    sorted: BTreeSet<String>,
+    /// The classes checked against the bound, and the sizes of the sets they come from when they
+    /// last were.
+    checked: HashSet<String>,
+    sizes: [usize; 6],
+}
+
 /// The fields of the record `decl` that are its components: those that are not static, in order.
 fn record_fields(decl: &Value) -> impl Iterator<Item = &Value> {
     decl["members"]
@@ -280,7 +331,10 @@ impl<'t> Walk<'t> {
         if self.lookups.is_empty() {
             return loaded;
         }
-        let (found, work) = self.reflected_members();
+        let mut cache = std::mem::take(&mut self.reflect_cache);
+        self.update_reflect_cache(&mut cache);
+        let (found, work) = self.reflected_members(&mut cache);
+        self.reflect_cache = cache;
         for item in &work {
             if let Item::Method(key) = item {
                 self.reflected_methods.insert(key.clone());
@@ -335,51 +389,52 @@ impl<'t> Walk<'t> {
     /// in `Walk::reflected_keys`, and whether the class declares or inherits a member of that
     /// name; and the members to make reachable. The members are found by class and name
     /// (`Walk::methods_by_name`, `Walk::fields_by_class`), as a computed name can be any of
-    /// thousands of strings in a library.
+    /// thousands of strings in a library. What `cache` holds from the calls before spares
+    /// looking again where nothing can be found (`ReflectCache`).
     #[allow(clippy::type_complexity)]
-    fn reflected_members(&self) -> (Vec<(String, String, (String, String), bool)>, Vec<Item>) {
+    fn reflected_members(
+        &self,
+        cache: &mut ReflectCache,
+    ) -> (Vec<(String, String, (String, String), bool)>, Vec<Item>) {
         let (methods, fields) = (&self.methods_by_name, &self.fields_by_class);
-        let mut supertypes: HashMap<String, Vec<String>> = HashMap::new();
-        let mut candidates: HashMap<(&str, Kind), Vec<String>> = HashMap::new();
         let mut found = Vec::new();
         let mut work = Vec::new();
         let mut seen = HashSet::new();
+        let ReflectCache { candidates, looked, supertypes, method_names, field_names, .. } = cache;
         for lookup in &self.lookups {
-            let classes: Vec<String> = match &lookup.literal {
-                Some(class) => vec![class.clone()],
-                None => {
-                    // Any record's components, whatever the `Class` value's type says.
-                    let bound = if lookup.kind == Kind::Record { OBJECT } else { lookup.bound.as_str() };
-                    candidates
-                        .entry((bound, lookup.kind))
-                        .or_insert_with(|| {
-                            let mut all: BTreeSet<&String> = self.named.iter().collect();
-                            all.extend(self.reach.found_by_name.iter());
-                            all.extend(self.flow_classes.get(&lookup.kind).into_iter().flatten());
-                            match lookup.kind {
-                                Kind::Constructor => {
-                                    all.extend(self.annotation_classes.iter());
-                                    // A `Class<? extends T>` below `Object` holds the class
-                                    // literals of `T`'s classes that code passes it, whose objects
-                                    // it makes (`KeyStoreDelegator`'s `PKCS12KeyStore.class`).
-                                    if !is_subtype_of_object(bound) {
-                                        all.extend(self.class_literals.iter());
-                                    }
-                                }
-                                Kind::Record => {
-                                    all.extend(self.class_literals.iter());
-                                    all.extend(self.record_types.iter());
-                                }
-                                _ => all.extend(self.class_literals.iter()),
-                            }
-                            all.into_iter().filter(|c| self.is_subtype(c, bound)).cloned().collect()
-                        })
-                        .clone()
-                }
+            // The classes it can look in: its class literal, or those of its bound and kind.
+            let group = lookup
+                .literal
+                .is_none()
+                .then(|| &candidates[&(candidate_bound(lookup).to_string(), lookup.kind)]);
+            let has = |class: &str| match (group, &lookup.literal) {
+                (Some(group), _) => group.sorted.contains(class),
+                (None, literal) => literal.as_deref() == Some(class),
             };
+            // A lookup whose names do not depend on the strings finds all it ever finds in a
+            // class the first time it looks there: it looks only in the classes added since, in
+            // order of name. One of a computed name looks in all of them again, in order of name.
+            let computed = lookup.kind != Kind::Constructor && !lookup.every && lookup.name.is_none();
+            let before = if computed { 0 } else { looked.get(lookup).copied().unwrap_or(0) };
+            let classes: Vec<&String> = match (group, &lookup.literal) {
+                (Some(group), _) if computed => group.sorted.iter().collect(),
+                (Some(group), _) => {
+                    let mut added: Vec<&String> =
+                        group.order[before.min(group.order.len())..].iter().collect();
+                    added.sort();
+                    added
+                }
+                (None, literal) => literal.iter().skip(before).collect(),
+            };
+            if !computed {
+                let count = group.map_or(1, |group| group.order.len());
+                if before != count {
+                    looked.insert(lookup.clone(), count);
+                }
+            }
             // `Object`'s `hashCode`, `equals` and `toString`, which the runtime's `Object` has
             // (`lower/reflection.rs`): the methods that a proxy class passes to its handler.
-            if lookup.kind == Kind::Method && classes.iter().any(|c| c == OBJECT) {
+            if lookup.kind == Kind::Method && has(OBJECT) {
                 for (name, _, _) in super::proxies::OBJECT_METHODS {
                     let wanted = match &lookup.name {
                         Some(n) if !lookup.every => n == name,
@@ -394,14 +449,17 @@ impl<'t> Walk<'t> {
             // The boxed classes' `valueOf(String)`, which the runtime's boxes have
             // (`lower/reflection.rs`): jopt-simple's converter of an option's values.
             if lookup.kind == Kind::Method {
-                for class in classes.iter().filter(|c| BOXES.contains(&c.as_str())) {
+                // In order of name, as the classes are looked in.
+                let mut boxes = BOXES;
+                boxes.sort_unstable();
+                for class in boxes.into_iter().filter(|c| has(c)) {
                     let wanted = match &lookup.name {
                         Some(n) if !lookup.every => n == "valueOf",
                         _ => lookup.every || self.strings.contains("valueOf"),
                     };
-                    let key = (class.clone(), "valueOf".to_string());
+                    let key = (class.to_string(), "valueOf".to_string());
                     if wanted && !self.reflected_keys.contains(&key) && seen.insert(key.clone()) {
-                        found.push((class.clone(), "valueOf".to_string(), key, true));
+                        found.push((class.to_string(), "valueOf".to_string(), key, true));
                     }
                 }
             }
@@ -412,7 +470,7 @@ impl<'t> Walk<'t> {
             {
                 // A `Class` value that the lookup cannot tell may be `Class.class` or
                 // `RecordComponent`'s, which code gets by its name.
-                let candidate = classes.iter().any(|c| c == owner)
+                let candidate = has(owner)
                     || lookup.literal.is_none()
                         && is_subtype_of_object(&lookup.bound)
                         && match owner {
@@ -434,7 +492,7 @@ impl<'t> Walk<'t> {
                 }
             }
             if lookup.kind == Kind::Record {
-                for class in classes.iter().filter(|c| self.classes.contains_key(*c)) {
+                for &class in classes.iter().filter(|c| self.classes.contains_key(c.as_str())) {
                     let decl = self.classes[class.as_str()].0;
                     let key = (class.clone(), RECORD_KEY.to_string());
                     if text(decl, "kind") != "RECORD"
@@ -472,32 +530,24 @@ impl<'t> Walk<'t> {
                 }
                 continue;
             }
-            for class in classes.into_iter().filter(|c| self.classes.contains_key(c)) {
-                let owners = supertypes.entry(class.clone()).or_insert_with(|| self.supertypes_of(&class));
+            for &class in classes.iter().filter(|c| self.classes.contains_key(c.as_str())) {
+                if !supertypes.contains_key(class) {
+                    supertypes.insert(class.clone(), self.supertypes_of(class));
+                }
+                let owners = &supertypes[class];
                 let names: Vec<String> = match (&lookup.name, lookup.kind) {
                     (_, Kind::Constructor) => vec!["<init>".to_string()],
                     (Some(name), _) if !lookup.every => vec![name.clone()],
                     // Every member, or for a computed name those that a string names.
                     (_, kind) => {
-                        let mut all: BTreeSet<&str> = BTreeSet::new();
-                        for owner in owners.iter() {
-                            match kind {
-                                Kind::Field => all.extend(
-                                    fields.get(owner.as_str()).into_iter().flatten().map(String::as_str),
-                                ),
-                                _ => all.extend(
-                                    methods
-                                        .get(owner.as_str())
-                                        .into_iter()
-                                        .flat_map(|m| m.keys())
-                                        .map(String::as_str)
-                                        .filter(|n| !n.starts_with('<')),
-                                ),
-                            }
+                        let cached = if kind == Kind::Field { &mut *field_names } else { &mut *method_names };
+                        if !cached.contains_key(class) {
+                            cached.insert(class.clone(), self.member_names(owners, kind));
                         }
-                        all.into_iter()
-                            .filter(|n| lookup.every || self.strings.contains(*n))
-                            .map(str::to_string)
+                        cached[class]
+                            .iter()
+                            .filter(|n| lookup.every || self.strings.contains(n.as_str()))
+                            .cloned()
                             .collect()
                     }
                 };
@@ -512,7 +562,7 @@ impl<'t> Walk<'t> {
                     }
                     // A class's constructors are its own: they are not inherited.
                     let owners: &[String] =
-                        if lookup.kind == Kind::Constructor { std::slice::from_ref(&class) } else { owners };
+                        if lookup.kind == Kind::Constructor { std::slice::from_ref(class) } else { owners };
                     let mut declared = false;
                     for owner in owners {
                         match lookup.kind {
@@ -542,6 +592,85 @@ impl<'t> Walk<'t> {
             }
         }
         (found, work)
+    }
+
+    /// The names of the members of kind `kind` (fields, or methods other than constructors and
+    /// initializers) that `owners`, a class and its supertypes, declare, in order.
+    fn member_names(&self, owners: &[String], kind: Kind) -> Vec<String> {
+        let mut all: BTreeSet<&str> = BTreeSet::new();
+        for owner in owners {
+            match kind {
+                Kind::Field => all.extend(
+                    self.fields_by_class.get(owner.as_str()).into_iter().flatten().map(String::as_str),
+                ),
+                _ => all.extend(
+                    self.methods_by_name
+                        .get(owner.as_str())
+                        .into_iter()
+                        .flat_map(|m| m.keys())
+                        .map(String::as_str)
+                        .filter(|n| !n.starts_with('<')),
+                ),
+            }
+        }
+        all.into_iter().map(str::to_string).collect()
+    }
+
+    /// Brings `cache` up to the walk: it starts over when a class was declared since it began
+    /// (`Walk::declarations`), and each bound and kind of a lookup without a class literal has
+    /// the classes of the sets it looks in that are or extend or implement the bound.
+    fn update_reflect_cache(&self, cache: &mut ReflectCache) {
+        if cache.declarations != self.declarations {
+            *cache = ReflectCache { declarations: self.declarations, ..ReflectCache::default() };
+        }
+        let flow = |kind: Kind| self.flow_classes.get(&kind).into_iter().flatten();
+        let flows: usize = self.flow_classes.values().map(BTreeSet::len).sum();
+        let sizes = [
+            self.named.len(),
+            self.reach.found_by_name.len(),
+            flows,
+            self.annotation_classes.len(),
+            self.class_literals.len(),
+            self.record_types.len(),
+        ];
+        for lookup in self.lookups.iter().filter(|l| l.literal.is_none()) {
+            let bound = candidate_bound(lookup);
+            let key = (bound.to_string(), lookup.kind);
+            if cache.candidates.get(&key).is_some_and(|group| group.sizes == sizes) {
+                continue;
+            }
+            let group = cache.candidates.entry(key).or_default();
+            group.sizes = sizes;
+            let mut sources: Vec<&String> = Vec::new();
+            sources.extend(self.named.iter());
+            sources.extend(self.reach.found_by_name.iter());
+            sources.extend(flow(lookup.kind));
+            match lookup.kind {
+                Kind::Constructor => {
+                    sources.extend(self.annotation_classes.iter());
+                    // A `Class<? extends T>` below `Object` holds the class literals of `T`'s
+                    // classes that code passes it, whose objects it makes
+                    // (`KeyStoreDelegator`'s `PKCS12KeyStore.class`).
+                    if !is_subtype_of_object(bound) {
+                        sources.extend(self.class_literals.iter());
+                    }
+                }
+                Kind::Record => {
+                    sources.extend(self.class_literals.iter());
+                    sources.extend(self.record_types.iter());
+                }
+                _ => sources.extend(self.class_literals.iter()),
+            }
+            for class in sources {
+                if !group.checked.contains(class) {
+                    group.checked.insert(class.clone());
+                    if self.is_subtype(class, bound) {
+                        group.order.push(class.clone());
+                        group.sorted.insert(class.clone());
+                    }
+                }
+            }
+        }
     }
 
     /// What the `Class` value `node` of the code being scanned is.

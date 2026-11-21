@@ -2969,6 +2969,11 @@ struct Walk<'t> {
     /// reflection hands out as `Class` values (`reflection.rs`).
     record_types: HashSet<String>,
     reflected_keys: HashSet<(String, String)>,
+    /// What the lookups of reflection keep from one search for members to the next, and the
+    /// number of classes declared so far, after which the kept classes and members start over
+    /// (`reflection::ReflectCache`).
+    reflect_cache: reflection::ReflectCache,
+    declarations: usize,
     /// The service providers of the sources, and the `Class` values that `ServiceLoader.load` of
     /// reachable code loads services of (`reflection.rs`).
     providers: Vec<super::modules::ServiceProvider>,
@@ -3279,6 +3284,7 @@ impl<'t> Walk<'t> {
         if !CLASS_KINDS.contains(&text(decl, "kind")) {
             return;
         }
+        self.declarations += 1;
         let class = class_name(decl);
         if outside(&class) {
             if provided(&class) {
