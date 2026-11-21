@@ -1967,14 +1967,20 @@ impl<'a> Gen<'a> {
             None => object,
         };
         let object = if self.captures_nothing(ctor) {
-            // A lambda that captures nothing is one object per place it is written, made the
-            // first time that place runs, as Java's runtime hands out one instance: in a static
-            // where every thread may use it (`java::PlaceObject`), else one per thread. Such an
-            // object has no fields, so only a `RefCell` around them, whose borrow flag is not
-            // atomic, keeps it to one thread in a program that starts threads.
+            // A lambda that captures nothing is one object per place it is written, as Java's
+            // runtime hands out one instance: a constant in a static where its object is its
+            // struct of no fields (`java::StaticObject`), whose handle is the static's address;
+            // else made the first time that place runs, in a static where every thread may use
+            // it (`java::PlaceObject`), else one per thread. Such an object has no fields, so
+            // only a `RefCell` around them, whose borrow flag is not atomic, keeps it to one
+            // thread in a program that starts threads.
             let ty = self.object_type(name);
             let shareable = !self.facts.threaded || !ty.contains("RefCell<");
-            if shareable {
+            if let Some((value_ty, value)) = self.constant_object(c) {
+                format!(
+                    "{{ static LAMBDA: java::StaticObject<{value_ty}> = java::StaticObject::new({value}); LAMBDA.handle() }}"
+                )
+            } else if shareable {
                 format!(
                     "{{ static LAMBDA: java::PlaceObject<{ty}> = java::PlaceObject::new(); LAMBDA.get(|| {object}) }}"
                 )
@@ -2008,6 +2014,27 @@ impl<'a> Gen<'a> {
         } else {
             format!("{pointer}::new({cell}::new({call}))")
         }
+    }
+
+    /// The value and its type of the object of class `t` (of no fields) as a constant, where its
+    /// handle is the runtime's `Arc` of a struct, or of a `java::Monitored` one: `S {}`, or
+    /// `java::Monitored::new(S {})`. A `RefCell` or `java::Locked` around the struct keeps the
+    /// object made at run time, and so do 4-byte references (`codegen::compact_references`), which
+    /// name only objects in the heap.
+    fn constant_object(&self, t: usize) -> Option<(String, String)> {
+        let name = &self.class.types[t].name;
+        if compact_references()
+            || self.pointer(t) != "Arc"
+            || !(self.celled(name) || self.facts.immutable.contains(name))
+        {
+            return None;
+        }
+        let structure = self.struct_of(t);
+        Some(if self.monitored(name) {
+            (format!("java::Monitored<{structure}>"), format!("java::Monitored::new({structure} {{}})"))
+        } else {
+            (structure.clone(), format!("{structure} {{}}"))
+        })
     }
 
     /// Whether `ctor` makes the object of a lambda or method reference that captures nothing: a

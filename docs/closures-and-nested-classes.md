@@ -551,18 +551,22 @@ reads the field at call time, so a static `FIB = n -> .. FIB.apply(n - 1) ..` re
 on each call, and an instance field set to a lambda capturing `this` makes a cycle through the
 closure's `Rc`, which is never freed.
 
-Closure-typed values are never compared (4.2, condition 4). A lambda in enum form is an object
-like any other: compared by identity, and printed as `Main$$Lambda@<hash>`. A lambda or method
-reference that captures nothing is one object per place it is written, as HotSpot makes it (the
-JLS leaves this open), made the first time the place runs (`captures_nothing` in
-`codegen/objects.rs`), which also saves an allocation each time it runs. The place keeps it in a
-`static` (`java::PlaceObject`), shared by every thread, as an object without fields can be unless
-it is a `RefCell`, whose borrow flag is not atomic: in a program that starts threads, such a place
-keeps a thread-local `OnceCell` instead, one object per thread. A thread-local takes its room in
-every thread's static thread-local storage, which the C library zeroes for each thread it starts
-and the collector scans at each collection: the Minecraft server's 14,300 places, all
-thread-local, took 114 KB of each of its 60 threads' 120 KB. A lambda that captures something is a new object at each
-evaluation.
+Closure-typed values are never compared (4.2, condition 4). A lambda in enum form is an object like
+any other: compared by identity, and printed as `Main$$Lambda@<hash>`. A lambda or method reference
+that captures nothing is one object per place it is written, as HotSpot makes it (the JLS leaves
+this open; `captures_nothing` in `codegen/objects.rs`), which also saves an allocation each time it
+runs. Where the object is its struct alone, or one in a `java::Monitored`, it is a constant in a
+`static` at that place (`java::StaticObject`), outside the heap, and taking it is loading the
+static's address: nothing makes it at run time, and no code checks whether it was made. 4-byte
+references (`JAVA_TO_RUST_COMPACT_REFERENCES`) name only objects in the heap, so under them, as
+where the struct is in a `RefCell` or a `java::Locked`, it is not a constant. Otherwise it
+is made the first time the place runs and kept in a `static` (`java::PlaceObject`), shared by every
+thread, as an object without fields can be unless it is a `RefCell`, whose borrow flag is not
+atomic: in a program that starts threads, such a place keeps a thread-local `OnceCell` instead, one
+object per thread. A thread-local takes its room in every thread's static thread-local storage,
+which the C library zeroes for each thread it starts and the collector scans at each collection: the
+Minecraft server's 14,300 places, all thread-local, took 114 KB of each of its 60 threads' 120 KB. A
+lambda that captures something is a new object at each evaluation.
 
 ### 4.9 Threads
 
@@ -656,4 +660,5 @@ Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMem
 `LambdaMadeOnce`, `LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
 `ClosureForms`, `LocalClosures`, `ClosureDefaultMethods`, `GenericClosures`), and in
 `corpus/whole-program/` (`FunctionChains`, `Comparators`, `ReverseOrder`,
-`LambdasInConstantBodies`, `ConstantBodyFieldLambdas`), which run only with the JDK's sources.
+`LambdasInConstantBodies`, `ConstantBodyFieldLambdas`, `LambdaPlaceObjects`), which run only with
+the JDK's sources.

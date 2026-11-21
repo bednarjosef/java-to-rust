@@ -50,7 +50,38 @@ impl<C> Deref for Global<C> {
     }
 }
 
-/// The object that a lambda or method reference capturing nothing is: one per place it is
+/// The object that a lambda or method reference capturing nothing is, where it is a struct of no
+/// fields (or one in a `Monitored`): one per place it is written, a constant in a `static` there,
+/// whose handle is the static's address. Nothing makes it at run time, and taking it is loading
+/// that address. The collector never frees it, as it is not in the heap, and scans it with the
+/// program's static data (`gc.rs`), which holds the lock a `Monitored` makes when a thread first
+/// takes it; a weak reference to it is never cleared. Only the translation makes one, of an
+/// object that threads may share. A byte after the value gives a struct of no size an address of
+/// its own, as `Slot`'s does: Java's `==` tells two places' objects apart. The byte is a cell, so
+/// the static is in writable data, which neither LLVM's merging of constants nor a linker's
+/// folding of identical sections joins with another static of the same bytes.
+#[repr(C)]
+pub struct StaticObject<T> {
+    value: T,
+    _byte: std::cell::UnsafeCell<u8>,
+}
+
+// Only for objects of no fields whose handles threads may share, as above.
+unsafe impl<T> Sync for StaticObject<T> {}
+
+impl<T> StaticObject<T> {
+    pub const fn new(value: T) -> StaticObject<T> {
+        StaticObject { value, _byte: std::cell::UnsafeCell::new(0) }
+    }
+
+    /// The object's handle.
+    #[inline(always)]
+    pub fn handle(&'static self) -> crate::Arc<T> {
+        crate::Arc::of_static(&self.value)
+    }
+}
+
+/// The object that a lambda or method reference capturing nothing is, elsewhere: one per place it is
 /// written, made the first time the place runs, in a `static` at that place. The translation
 /// puts one there only where every thread may use the object, which has no fields: in a program
 /// that starts no thread, or where the object is not a `RefCell`, whose borrow flag is not atomic;

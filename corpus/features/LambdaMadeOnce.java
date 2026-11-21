@@ -47,5 +47,11 @@ public class LambdaMadeOnce {
         System.out.println((c1 == c2) + " " + c1.apply(1));
         Function<String, Integer> length = String::length;
         System.out.println(length.apply("abcd"));
+        // The one object of a place can be locked and hashed by identity.
+        Op locked = twice();
+        synchronized (locked) {
+            System.out.println("locked " + locked.apply(5));
+        }
+        System.out.println(System.identityHashCode(twice()) == System.identityHashCode(locked));
     }
 }
