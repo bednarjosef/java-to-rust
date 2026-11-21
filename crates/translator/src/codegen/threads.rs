@@ -1,13 +1,16 @@
 //! The modules of a round written on several threads. Each thread has a generator of its own,
-//! with its own resolver (`modules::enter`) and caches, and takes the next module not yet taken,
+//! with its own resolver (`modules::enter_names`, over the program's names found once) and caches, and takes the next module not yet taken,
 //! in the order they are written, until none is left; what it writes of a module depends on the
 //! module alone (`Gen::module`), so the modules are the same whichever thread writes them, and
-//! they are put back in their order. What the generators found besides the text (`Found`) is
+//! they are put back in their order. A module of many free functions (the crate root, with the
+//! reflection table's data) is taken in parts of its functions (`Plan::parts`), and a part
+//! depends on its functions alone but for the blank line before its first, which joining the
+//! parts puts back (`modules::join_parts`). What the generators found besides the text (`Found`) is
 //! the same as one generator would find, as each part of it only grows. A panic outside the
 //! methods, which a census does not catch (`catch_panics`), comes out of the first module in
 //! their order that panicked, with its place in the translator, as it would with one thread.
 //!
-//! The generator writes on four threads, or as many as the machine has if fewer, unless
+//! The generator writes on eight threads, or as many as the machine has if fewer, unless
 //! `JAVA_TO_RUST_GENERATOR_THREADS` says how many (see "Generator threads" in
 //! docs/performance.md).
 
@@ -33,7 +36,7 @@ pub fn on_threads<T>(threads: usize, f: impl FnOnce() -> T) -> T {
     out
 }
 
-/// How many threads write modules: `JAVA_TO_RUST_GENERATOR_THREADS`, or four (`DEFAULT_THREADS`),
+/// How many threads write modules: `JAVA_TO_RUST_GENERATOR_THREADS`, or eight (`DEFAULT_THREADS`),
 /// or as many as the machine has if fewer.
 fn threads() -> usize {
     THREADS.get().unwrap_or_else(|| {
@@ -43,9 +46,9 @@ fn threads() -> usize {
     })
 }
 
-/// The threads that write modules by default: past four, the crate root, written by one thread,
-/// is most of a round on the Minecraft server.
-const DEFAULT_THREADS: usize = 4;
+/// The threads that write modules by default: on the Minecraft server's census, eight write its
+/// first round in 6.3 s and four in 8.5 s, at the same peak.
+const DEFAULT_THREADS: usize = 8;
 
 /// A panic while a module was written, with the module's place among those written, where in
 /// the translator it happened, and the method being written then (`WRITING`).
@@ -75,13 +78,21 @@ pub(super) fn write_modules(
             &all
         }
     };
-    let threads = threads().clamp(1, indexes.len().max(1));
-    let queue = Queue { indexes, next: AtomicUsize::new(0), stop: AtomicUsize::new(usize::MAX) };
+    // On several threads, a module of many functions is written in parts (`Plan::parts`), so that
+    // the crate root is not one thread's work while the others wait.
+    let cut = threads() > 1 && round.only_enums.is_none() && first.is_none();
+    let units: Vec<(usize, std::ops::Range<usize>)> = indexes
+        .iter()
+        .flat_map(|&index| setup.plans[index].parts(cut).into_iter().map(move |part| (index, part)))
+        .collect();
+    let threads = threads().clamp(1, units.len().max(1));
+    let queue = Queue { units: &units, next: AtomicUsize::new(0), stop: AtomicUsize::new(usize::MAX) };
     let write = || write_some(class, facts, setup, round, first, &queue);
     let results: Vec<Result<Written, Panicked>> = if threads == 1 {
         vec![write()]
     } else {
         let (shared, catching) = (shared_strings(), CATCHING.with(|c| c.get()));
+        let names = modules::entered();
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..threads)
                 .map(|_| {
@@ -89,7 +100,7 @@ pub(super) fn write_modules(
                     let run = || {
                         SHARED_STRINGS.set(shared);
                         catch_panics(catching);
-                        let _modules = modules::enter(class);
+                        let _modules = modules::enter_names(&names);
                         write()
                     };
                     thread.spawn_scoped(scope, run).expect("a thread for the generator")
@@ -106,15 +117,14 @@ pub(super) fn write_modules(
                 .collect()
         })
     };
-    let mut modules: Vec<Option<(modules::Written, Found)>> = indexes.iter().map(|_| None).collect();
+    let mut parts: Vec<Option<(modules::Written, Found, std::time::Duration)>> =
+        units.iter().map(|_| None).collect();
     let mut panics = Vec::new();
-    let mut times = Vec::new();
     for result in results {
         match result {
             Ok(written) => {
                 for (at, module, found, time) in written.modules {
-                    modules[at] = Some((module, found));
-                    times.push((time, indexes[at]));
+                    parts[at] = Some((module, found, time));
                 }
             }
             Err(panicked) => panics.push(panicked),
@@ -125,8 +135,65 @@ pub(super) fn write_modules(
         crate::lower::panic_carried(place);
         std::panic::resume_unwind(payload);
     }
+    // The parts of each module, which are next to each other in `units`, joined.
+    let mut modules = Vec::with_capacity(indexes.len());
+    let mut times = Vec::with_capacity(indexes.len());
+    let mut parts = units.iter().zip(parts).peekable();
+    while let Some((&(index, _), part)) = parts.next() {
+        let (module, found, time) = part.expect("every part is written");
+        let (mut written, mut founds, mut spent) = (vec![module], vec![found], time);
+        while let Some((_, part)) = parts.next_if(|((next, _), _)| *next == index) {
+            let (module, found, time) = part.expect("every part is written");
+            written.push(module);
+            founds.push(found);
+            spent += time;
+        }
+        let found = if founds.len() == 1 { founds.pop().expect("a part") } else { Found::all(&founds) };
+        modules.push((modules::join_parts(class, written), found));
+        times.push((spent, index));
+    }
     slowest_timing(setup, times);
-    modules.into_iter().map(|module| module.expect("every module is written")).collect()
+    modules
+}
+
+/// `f` of each of `items`, in their order, on the generator's threads (`threads`), each with
+/// the program's resolver (`modules::enter_names`) as a thread that writes modules has.
+pub(super) fn on_each<T: Send, U: Send>(items: Vec<T>, f: impl Fn(T) -> U + Sync) -> Vec<U> {
+    let threads = threads().clamp(1, items.len().max(1));
+    if threads == 1 {
+        return items.into_iter().map(f).collect();
+    }
+    let slots: Vec<std::sync::Mutex<Option<T>>> =
+        items.into_iter().map(|item| std::sync::Mutex::new(Some(item))).collect();
+    let next = AtomicUsize::new(0);
+    let (shared, names) = (shared_strings(), modules::entered());
+    let done: Vec<Vec<(usize, U)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let thread = std::thread::Builder::new().name("generator".to_string()).stack_size(STACK);
+                let run = || {
+                    SHARED_STRINGS.set(shared);
+                    let _modules = modules::enter_names(&names);
+                    let mut out = Vec::new();
+                    loop {
+                        let at = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(slot) = slots.get(at) else { break };
+                        let item = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        out.push((at, f(item.expect("each item is taken once"))));
+                    }
+                    out
+                };
+                thread.spawn_scoped(scope, run).expect("a thread for the generator")
+            })
+            .collect();
+        let joined = handles.into_iter().map(|handle| handle.join());
+        joined.map(|done| done.unwrap_or_else(|payload| std::panic::resume_unwind(payload))).collect()
+    });
+    let mut out: Vec<Option<U>> = slots.iter().map(|_| None).collect();
+    for (at, u) in done.into_iter().flatten() {
+        out[at] = Some(u);
+    }
+    out.into_iter().map(|u| u.expect("each item is done")).collect()
 }
 
 /// The `--timings` line of the modules of a round that took longest to write, by package, which
@@ -161,10 +228,11 @@ struct Written {
     modules: Vec<(usize, modules::Written, Found, std::time::Duration)>,
 }
 
-/// The modules that the generators of a round write, by index (`indexes`): the place among them of
-/// the next one that no generator took (`next`), and the earliest where one panicked (`stop`).
+/// The modules that the generators of a round write, by index and the range of its methods that
+/// the part holds (`units`): the place among them of the next one that no generator took
+/// (`next`), and the earliest where one panicked (`stop`).
 struct Queue<'a> {
-    indexes: &'a [usize],
+    units: &'a [(usize, std::ops::Range<usize>)],
     next: AtomicUsize,
     stop: AtomicUsize,
 }
@@ -179,19 +247,19 @@ fn write_some(
     first: Option<&[modules::Written]>,
     queue: &Queue,
 ) -> Result<Written, Panicked> {
-    let Queue { indexes, next, stop } = queue;
+    let Queue { units, next, stop } = queue;
     let mut g = Gen::new(class, facts, setup, round);
     let mut written = Vec::new();
     loop {
         let at = next.fetch_add(1, Ordering::Relaxed);
-        if at >= indexes.len() || at > stop.load(Ordering::Relaxed) {
+        if at >= units.len() || at > stop.load(Ordering::Relaxed) {
             break;
         }
-        let index = indexes[at];
+        let (index, ref part) = units[at];
         let kept = first.map(|first| &first[index]);
         let start = std::time::Instant::now();
-        match std::panic::catch_unwind(AssertUnwindSafe(|| g.module(&setup.plans[index], &setup.live, kept)))
-        {
+        let write = || g.module(&setup.plans[index], &setup.live, kept, part.clone());
+        match std::panic::catch_unwind(AssertUnwindSafe(write)) {
             // What writing a module found is the module's own: nothing that the generator found
             // before is read while it writes (`Found`).
             Ok(module) => written.push((at, module, g.take_found(), start.elapsed())),

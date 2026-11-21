@@ -126,10 +126,14 @@ The pieces, smallest first:
   translation tests) or `FilePerModule` (`--crate`: `src/com/example/util.rs` for
   `com.example.util`). An item's text is the same in both; the one-file layout indents it.
 
-What is left: the resolver is still held in a thread-local for the duration of `generate`,
-because the functions that make names (`struct_name`, `cell_name`, `init_name`) are called from
-about 40 places in 10 files; passing the resolver to them is mechanical and was left for a time
-when fewer branches edit the generator. Natural names plug in at the resolver (it decides every
+What a resolver knows of the program (the package of each class, each package's path, the
+aliases, and the names of nested classes that would clash) is found once per translation
+(`modules::names`, kept in the generator's `Setup`) and shared by every round and thread; each
+thread enters it with a part of its own for the module and item being written
+(`modules::enter_names`). That entered resolver is held in a thread-local for the duration of
+`generate`, because the functions that make names (`struct_name`, `cell_name`, `init_name`) are
+called from about 40 places in 10 files; passing the resolver to them is mechanical and was left
+for a time when fewer branches edit the generator. Natural names plug in at the resolver (it decides every
 path and could decide the names). The split into crates (`--crates`, `split.rs`) works on the
 finished module tree, separating declarations from code, so it needs nothing of the resolver (see
 [several-crates.md](several-crates.md)).

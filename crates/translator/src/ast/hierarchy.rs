@@ -267,8 +267,9 @@ impl Hierarchy {
         out
     }
 
-    /// `t` and its subtypes, each once, in no particular order.
-    fn subtree(&self, t: usize) -> Vec<usize> {
+    /// `t` and its subtypes, each once, in no particular order: the types `a` that
+    /// `is_subtype(a, t)`, found from `t` down.
+    pub fn subtree(&self, t: usize) -> Vec<usize> {
         let mut seen = vec![false; self.subtypes.len()];
         seen[t] = true;
         let mut out = vec![t];
