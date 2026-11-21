@@ -22,6 +22,7 @@ mod arrays;
 mod borrowing;
 mod boxing;
 pub(crate) mod closure;
+mod closure_factories;
 pub mod closures;
 mod constants;
 mod early_reads;
@@ -61,6 +62,7 @@ pub(crate) use npe_messages::{
 pub use npe_messages::{KeptMessages, npe_messages, npe_messages_kept};
 
 pub use arrays::{RowIndex, Slice, SlicedLoop};
+pub use closure_factories::inline_closure_factories;
 pub use escape::{Guard, StackObjects};
 pub use nullness::{conjuncts, maybe_null, non_null_names, null_test, nullable_type, nullable_var};
 pub use string_identity::string_identity;

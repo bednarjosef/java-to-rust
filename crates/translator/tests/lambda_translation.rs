@@ -298,6 +298,84 @@ fn a_lambda_passed_to_a_lent_parameter_borrows_the_lent_closure_it_captures() {
 }
 
 #[test]
+fn a_call_of_a_static_method_that_only_returns_a_lambda_is_the_lambda() {
+    let rust = translate(
+        "class A {
+            interface Op { int apply(int x); }
+            static Op scaled(int k) { return x -> x * k; }
+            static int sum(int n, Op op) {
+                int total = 0;
+                for (int i = 0; i < n; i++) total += op.apply(i);
+                return total;
+            }
+            static int next(int k) { System.out.println(k); return k; }
+            public static void main(String[] args) {
+                int k = args.length + 3;
+                int changed = 2;
+                Op before = scaled(changed);
+                changed = 5;
+                System.out.println(sum(4, scaled(k)) + \" \" + sum(2, scaled(next(k))) + \" \" + before.apply(changed));
+            }
+        }",
+    );
+    // The lambda is lent from where the call was, borrowing the argument.
+    assert_contains(&rust, &["sum(4, &(|x: i32| -> i32 { x.wrapping_mul(k) }))"]);
+    // An argument with effects, or a variable assigned again, keeps the call.
+    assert_contains(&rust, &["sum(2, &**(&scaled(next(k))))", "let before = scaled(changed);"]);
+}
+
+#[test]
+fn a_static_method_of_the_closure_type_that_only_returns_a_lambda_is_the_lambda() {
+    let rust = translate(
+        "class A {
+            interface Visit {
+                boolean at(int i);
+                static Visit below(int limit) { return i -> i < limit; }
+            }
+            static int count(int n, Visit v) {
+                int c = 0;
+                for (int i = 0; i < n; i++) if (v.at(i)) c++;
+                return c;
+            }
+            public static void main(String[] args) {
+                int k = args.length + 3;
+                System.out.println(count(5, Visit.below(k)));
+            }
+        }",
+    );
+    assert_contains(&rust, &["count(5, &(|i: i32| -> bool { i < k }))"]);
+}
+
+#[test]
+fn a_closure_factory_whose_lambda_calls_it_keeps_that_call() {
+    let rust = translate(
+        "class A {
+            interface Chain { int then(Total next, int depth); }
+            static final class Total {
+                int sum;
+                void add(int i) { sum += i; }
+            }
+            static Chain chain(Total t) {
+                return (next, d) -> {
+                    t.add(d);
+                    return d <= 0 ? t.sum : chain(next).then(t, d - 1);
+                };
+            }
+            public static void main(String[] args) {
+                Total a = new Total();
+                Total b = new Total();
+                System.out.println(chain(a).then(b, 3));
+            }
+        }",
+    );
+    // Main makes the lambda where it called the factory, and the factory keeps its body for the
+    // call in the lambda's code, whose argument is the lambda's parameter: that call stays a
+    // call, so the lambda is written once in each.
+    assert_eq!(rust.matches("d: i32| -> i32").count(), 2, "{rust}");
+    assert_contains(&rust, &["fn chain("]);
+}
+
+#[test]
 fn a_lambda_reaches_the_enclosing_object_through_outer() {
     let rust = translate(
         "class A {

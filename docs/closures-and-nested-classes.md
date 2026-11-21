@@ -472,6 +472,24 @@ borrowed string parameter, `-> Result<_, Throwable>` when the method throws).
   `let f = |x: i32| -> i32 { .. };`, lent as `&f`. It borrows what it captures when each capture
   is a local or a clone of one (`this` included), and moves its captures in otherwise.
 
+A call of a closure factory, a static method whose body only returns a lambda of a closure type
+that captures nothing but distinct parameters (the Minecraft server's
+`AbortableIterationConsumer.forConsumer(consumer)`, `e -> { consumer.accept(e); return
+CONTINUE; }`), is replaced by that lambda before the analyses run
+(`analysis/closure_factories.rs`), the call's arguments its captures. The closure is then made
+where the call was and takes one of the forms above there: passed to a lent parameter, or held
+for an ordered call in an `argument$N` local that only lends it, it is on the caller's stack with
+no `Rc`; and what it captures is held by an object of the caller's own, which the escape analysis
+follows into the methods that it is lent to, where a factory's parameter that its result holds
+would escape. A closure has no identity, so one made at each call is the factory's. Only calls
+whose arguments are variables that the calling method never assigns or `this` (perhaps
+converted to a supertype) are replaced, so that reading them where the lambda is made, in its
+order of captures and not at all for a parameter it does not capture, changes nothing; and only
+factories whose class and supertypes need no eager initialization (`analysis/statics.rs`), so
+that skipping the class's initialization at the call does nothing anyone can see. Calls in the
+code of a factory's lambda stay calls, since a lambda made again inside its own body would be
+written without end. The factory keeps its body for its other calls.
+
 The closure is written where the lambda is created: the lambda class's method is generated
 inside the creating expression with its own names and facts, and its capture fields become
 locals bound before the closure and moved in (`field_locals`), so `this.k` is `k` and
@@ -593,8 +611,8 @@ below it) is `Arc<dyn Fn(..) -> R + Send + Sync>`, its closures `Arc::new(..)`, 
 in one place (`closure_handle` in `codegen/closures.rs`); what they capture is of shared types by
 the same walk. Other closure types keep `Rc`, also in a program with threads. Corpus:
 `corpus/threads/ClosuresAcrossThreads.java`, `ClosureMethodsAcrossThreads.java`,
-`OperatorsAcrossThreads.java`, `LentClosuresAcrossThreads.java`, and
-`corpus/whole-program/ReflectedLentClosures.java`.
+`OperatorsAcrossThreads.java`, `LentClosuresAcrossThreads.java`,
+`ClosureFactoriesAcrossThreads.java`, and `corpus/whole-program/ReflectedLentClosures.java`.
 
 ## 5. for-each over `Iterable`
 
@@ -672,13 +690,15 @@ Plans, each a refinement of a correct form that exists:
 | `lower/foreach.rs` | for-each over `Iterable` |
 | `lower/hierarchy.rs` | `o.super(..)` and `Outer.super.m()` |
 | `analysis/closures.rs` | which interfaces are closure types; lent closure parameters and the captures that hold them; closure locals |
+| `analysis/closure_factories.rs` | calls of static methods that only return a closure's lambda, replaced by the lambda |
 | `codegen/closures.rs` | aliases, closures, calls, extension traits, `Rc` or `Arc` |
 
 Corpus programs: `corpus/features/` (`LocalClasses`, `CapturedLocals`, `LocalMemberClasses`,
 `InnerClasses`, `InnerClassTrees`, `InnerIterators`, `InnerSuperclassesWithExplicitOuters`,
 `AnonymousClasses`, `AnonymousSubclasses`, `ForEachIterable`, `IteratorRemove`, `LambdaObjects`,
 `LambdaMadeOnce`, `LambdaCaptures`, `MethodReferences`, `MethodReferenceReceivers`, `SuperInLambdas`,
-`ClosureForms`, `LocalClosures`, `LentClosureCaptures`, `ClosureDefaultMethods`,
-`GenericClosures`), and in `corpus/whole-program/` (`FunctionChains`, `Comparators`,
-`ReverseOrder`, `LambdasInConstantBodies`, `ConstantBodyFieldLambdas`, `LambdaPlaceObjects`,
-`LentClosures`), which run only with the JDK's sources.
+`ClosureForms`, `LocalClosures`, `LentClosureCaptures`, `ClosureFactories`,
+`ClosureDefaultMethods`, `GenericClosures`), and in `corpus/whole-program/` (`FunctionChains`,
+`Comparators`, `ReverseOrder`, `LambdasInConstantBodies`, `ConstantBodyFieldLambdas`,
+`LambdaPlaceObjects`, `LentClosures`, `ClosureFactoriesInPackages`), which run only with the
+JDK's sources.

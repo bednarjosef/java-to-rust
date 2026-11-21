@@ -300,6 +300,7 @@ fn translate_reached(
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
     phase("whole objects", || analysis::whole_objects(&mut class))
         .map_err(|error| ProgramError { file: locate(&units, &class, error.pos), error })?;
+    phase("closure factories", || analysis::inline_closure_factories(&mut class));
     let located = |error: Error| ProgramError { file: locate(&units, &class, error.pos), error };
     let mut facts = phase("analyze", || analysis::analyze(&class)).map_err(located)?;
     // A `catch` reads the message of a `NullPointerException`: it names the class file's code.
