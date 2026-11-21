@@ -368,7 +368,7 @@ fn restubbed(
         }
     }
     let again: Vec<usize> = again.into_iter().collect();
-    let _modules = modules::enter(class);
+    let _modules = modules::enter_names(&setup.names);
     let wanted = Needs::new();
     let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
     let written = threads::write_modules(class, facts, setup, &round, None, Some(&again));
@@ -534,6 +534,8 @@ struct Setup {
     /// The enums whose `valueOf` a `catch` or `finally` sees fail (`enums::checked_value_ofs`),
     /// found once rather than by each round's generators.
     checked_value_ofs: HashSet<&'static str>,
+    /// The names of the program's classes, which every round and thread enters.
+    names: modules::Names,
 }
 
 impl Setup {
@@ -558,13 +560,15 @@ impl Setup {
             ("stack_forms", self.stack_forms == other.stack_forms),
             ("stack_sites", self.stack_sites == other.stack_sites),
             ("checked_value_ofs", self.checked_value_ofs == other.checked_value_ofs),
+            ("names", self.names == other.names),
         ];
         fields.into_iter().filter(|(_, same)| !same).map(|(name, _)| name).collect()
     }
 
     fn new(class: &Class, facts: &Facts) -> Setup {
         // The names of methods are made in the program's modules, before any is written.
-        let _modules = modules::enter(class);
+        let names = modules::names(class);
+        let _modules = modules::enter_names(&names);
         use crate::timings::phase;
         let homes: Vec<Home> = phase("codegen: setup: homes", || {
             (0..class.methods.len()).map(|m| hierarchy::home(class, facts, m)).collect()
@@ -617,6 +621,7 @@ impl Setup {
             checked_value_ofs: phase("codegen: setup: checked valueOfs", || {
                 enums::checked_value_ofs(class, facts)
             }),
+            names,
         };
         let wanted = Needs::new();
         let round = Round { wanted: &wanted, impl_needs: HashMap::new(), only_enums: None };
@@ -649,7 +654,7 @@ fn generate_with(
     only_enums: Option<&OnlyEnums>,
     kept: &mut Option<Kept>,
 ) -> (Option<ModuleTree>, Needs, Vec<Error>, Vec<Error>) {
-    let _modules = modules::enter(class);
+    let _modules = modules::enter_names(&setup.names);
     let round = Round {
         wanted,
         impl_needs: dispatch::impl_needs(wanted, &setup.homes),

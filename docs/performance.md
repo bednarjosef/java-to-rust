@@ -879,8 +879,14 @@ and 3.7 s on four, at a peak of 2.19 GB instead of 1.90 GB. On the Minecraft ser
 four threads with mimalloc take the generator from 97 s to 42 s (its first round from 34 s to
 8 s) at a census peak of 15.3 GB, and the trial's sources are the same, byte for byte, as one
 thread's. The generator writes on four threads, or on as many as the machine has if fewer, unless
-`JAVA_TO_RUST_GENERATOR_THREADS` says how many: past four, the crate root, which one thread
-writes, is most of the first round (5.6 s of 8 s on the Minecraft server).
+`JAVA_TO_RUST_GENERATOR_THREADS` says how many. A module of many functions is written in parts
+of 128 functions (`modules::PART_FUNCTIONS`), each a unit of its own for the threads, and joined
+in order (`modules::join_parts`): the crate root of the Minecraft server has 1,384 functions of
+the reflection table, which one thread wrote in 11.6 of the first round's 18.6 s on a loaded
+machine. Only the first round, with more than one thread, cuts modules: the rounds of enum items
+write few functions. The `use` lines and root imports of each finished module are made on the
+threads too (`threads::on_each`), and each thread enters the program's names found once
+(`modules::names`) rather than finding them again.
 
 **Messages kept from round to round.** Pass 3 of a census runs the analyses, the messages of
 `NullPointerException`s and the generator once per round, and the stubs between the rounds change

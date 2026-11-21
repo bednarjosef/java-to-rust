@@ -455,10 +455,11 @@ impl<'a> Gen<'a> {
         }
         let h = &self.class.hierarchy;
         let throwable = self.class.type_index("java.lang.Throwable");
-        let classes: Vec<usize> = (0..self.class.types.len())
-            .filter(|&t| !matches!(self.class.types[t].kind, TypeKind::Interface | TypeKind::Param))
+        // The classes below it, from it down: a look at every type of the program for each
+        // interface took seconds on the Minecraft server's 27,000.
+        let members: Vec<usize> = (h.subtree(c).into_iter())
+            .filter(|&t| t != c && !matches!(self.class.types[t].kind, TypeKind::Interface | TypeKind::Param))
             .collect();
-        let members: Vec<usize> = classes.iter().copied().filter(|&t| t != c && h.is_subtype(t, c)).collect();
         if throwable.is_some_and(|e| members.iter().any(|&t| h.is_subtype(t, e))) {
             return None;
         }

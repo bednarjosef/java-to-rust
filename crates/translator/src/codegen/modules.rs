@@ -23,17 +23,27 @@ use super::*;
 use crate::output::{Item, Module, ModuleTree, Origin};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 thread_local! {
     static RESOLVER: RefCell<Option<Resolver>> = const { RefCell::new(None) };
     /// The names in their packages of the nested classes whose names there, without the dots,
     /// are another class's of the package too (`flat_name`).
-    static CLASHING: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static CLASHING: RefCell<Option<Arc<HashMap<String, String>>>> = const { RefCell::new(None) };
 }
 
-/// Names of the program's classes, static fields and static methods, as written from the module
-/// being written; and the modules that the module and the item being written refer to.
-struct Resolver {
+/// The names of a program's classes that stay the same while it is written: found once
+/// (`names`), and shared by every round and thread that writes it (`enter_names`).
+#[derive(PartialEq)]
+pub(super) struct Names {
+    clashing: Arc<HashMap<String, String>>,
+    /// `None` for a program whose classes are all in the unnamed package.
+    fixed: Option<Arc<Fixed>>,
+}
+
+/// The part of a resolver that stays the same while a program is written.
+#[derive(PartialEq)]
+struct Fixed {
     /// The package of every class, by qualified name.
     packages: HashMap<String, String>,
     /// The path of each package's module from the crate root (`absolute`), such as
@@ -43,6 +53,12 @@ struct Resolver {
     /// name: those whose module name no other module of the program has, and that names nothing
     /// else a module may have in scope.
     aliases: HashMap<String, String>,
+}
+
+/// Names of the program's classes, static fields and static methods, as written from the module
+/// being written; and the modules that the module and the item being written refer to.
+struct Resolver {
+    fixed: Arc<Fixed>,
     /// The package whose module is being written; `None` before any item is written, when names
     /// are made without a path (such as the type suffixes of overloaded methods).
     current: Option<String>,
@@ -60,8 +76,8 @@ struct Resolver {
 const TAKEN: &str = "fmt java java_runtime std core alloc \
     bool char str i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64";
 
-impl Resolver {
-    fn new(class: &Class) -> Self {
+impl Fixed {
+    fn new(class: &Class, clashing: &HashMap<String, String>) -> Self {
         // A runtime value's class is the runtime's, whatever its name: the JDK's `Character`,
         // which is translated for its static members, is the box's class too.
         let packages: HashMap<String, String> = class
@@ -78,8 +94,10 @@ impl Resolver {
             by_name.entry(name).or_default().insert(package);
         }
         // A class whose name is a module's (Java allows `class util`) would clash with its `use`.
-        let types: HashSet<String> =
-            packages.iter().map(|(name, package)| flat_name(name, local_name(name, package))).collect();
+        let types: HashSet<String> = packages
+            .iter()
+            .map(|(name, package)| flat_in(clashing, name, local_name(name, package)))
+            .collect();
         let aliases = by_name
             .into_iter()
             .filter(|(name, packages)| {
@@ -87,10 +105,14 @@ impl Resolver {
             })
             .filter_map(|(name, packages)| Some((packages.into_iter().next()?, name)))
             .collect();
+        Fixed { packages, paths, aliases }
+    }
+}
+
+impl Resolver {
+    fn new(fixed: Arc<Fixed>) -> Self {
         Resolver {
-            packages,
-            paths,
-            aliases,
+            fixed,
             current: None,
             imports: BTreeSet::new(),
             refers: BTreeSet::new(),
@@ -106,12 +128,12 @@ impl Resolver {
             return String::new();
         }
         self.refers.insert(package.to_string());
-        match self.aliases.get(package) {
+        match self.fixed.aliases.get(package) {
             Some(alias) => {
                 self.imports.insert(package.to_string());
                 format!("{alias}::")
             }
-            None => self.paths[package].clone(),
+            None => self.fixed.paths[package].clone(),
         }
     }
 
@@ -128,7 +150,7 @@ impl Resolver {
     /// `path`, which names an item from the module being written, from the crate root.
     fn absolute_path(&self, path: &str) -> String {
         match path.split_once("::") {
-            Some((alias, rest)) => match self.aliases.iter().find(|(_, a)| *a == alias) {
+            Some((alias, rest)) => match self.fixed.aliases.iter().find(|(_, a)| *a == alias) {
                 Some((package, _)) => format!("{}{rest}", absolute(package)),
                 None => path.to_string(),
             },
@@ -167,20 +189,31 @@ pub(super) struct Scope;
 impl Drop for Scope {
     fn drop(&mut self) {
         RESOLVER.with_borrow_mut(|r| *r = None);
-        CLASHING.with_borrow_mut(HashMap::clear);
+        CLASHING.with_borrow_mut(|c| *c = None);
     }
 }
 
-/// Enters the names of a program's classes (`flat_name`), and the resolver of a program whose
-/// classes are in packages; a program (or file) whose classes are all in the unnamed package has
-/// none, and is generated as before.
-pub(super) fn enter(class: &Class) -> Scope {
-    CLASHING.with_borrow_mut(|c| *c = clashing(class));
-    if class.types.iter().any(|t| !t.package.is_empty()) {
-        let resolver = Resolver::new(class);
-        RESOLVER.with_borrow_mut(|r| *r = Some(resolver));
-    }
+/// The names of a program's classes (`flat_name`), and the fixed part of the resolver of a
+/// program whose classes are in packages; a program (or file) whose classes are all in the
+/// unnamed package has none, and is generated as before.
+pub(super) fn names(class: &Class) -> Names {
+    let clashing = clashing(class);
+    let fixed =
+        class.types.iter().any(|t| !t.package.is_empty()).then(|| Arc::new(Fixed::new(class, &clashing)));
+    Names { clashing: Arc::new(clashing), fixed }
+}
+
+/// Enters `names` on this thread, with a resolver of its own where the program has one.
+pub(super) fn enter_names(names: &Names) -> Scope {
+    CLASHING.with_borrow_mut(|c| *c = Some(names.clashing.clone()));
+    RESOLVER.with_borrow_mut(|r| *r = names.fixed.clone().map(Resolver::new));
     Scope
+}
+
+/// The names this thread has entered, for other threads to enter.
+pub(super) fn entered() -> Names {
+    let clashing = CLASHING.with_borrow(|c| c.clone()).expect("the program's names are entered");
+    Names { clashing, fixed: RESOLVER.with_borrow(|r| r.as_ref().map(|r| r.fixed.clone())) }
 }
 
 /// The classes of the program whose names would be another's without the dots, with the names
@@ -212,7 +245,14 @@ fn clashing(class: &Class) -> HashMap<String, String> {
 /// `Outer.Inner` is `OuterInner`, or another name where that would be another class's
 /// (`clashing`).
 pub(super) fn flat_name(name: &str, local: &str) -> String {
-    CLASHING.with_borrow(|c| c.get(name).cloned()).unwrap_or_else(|| local.replace('.', ""))
+    CLASHING.with_borrow(|c| match c {
+        Some(c) => flat_in(c, name, local),
+        None => local.replace('.', ""),
+    })
+}
+
+fn flat_in(clashing: &HashMap<String, String>, name: &str, local: &str) -> String {
+    clashing.get(name).cloned().unwrap_or_else(|| local.replace('.', ""))
 }
 
 fn with<T>(f: impl FnOnce(&mut Resolver) -> T) -> Option<T> {
@@ -230,6 +270,11 @@ fn set_current(package: &str) {
 
 /// The packages of other modules and the classes that an item names.
 type Named = (BTreeSet<String>, BTreeSet<String>);
+
+/// The most methods whose free functions a part of a module holds (`Plan::parts`), where a round
+/// writes a module in parts on several threads: the crate root of the Minecraft server has 2,649
+/// pieces, mostly the 1,384 functions of the reflection table's data, 11.6 of its 14.3 s.
+pub(super) const PART_FUNCTIONS: usize = 128;
 
 /// A piece of a module that the generator writes as one item (`Gen::piece`).
 #[derive(Clone, Copy)]
@@ -268,6 +313,8 @@ pub(super) struct Written {
     traits: BTreeSet<String>,
     /// What writing the module found that cannot be translated (`Gen::rejected`), in order.
     pub(super) rejected: Vec<Error>,
+    /// How long each of the crate root's pieces took to write, with `--timings`.
+    times: Vec<(std::time::Duration, Piece)>,
 }
 
 /// An item of a module as the generator writes it (`Written`).
@@ -296,6 +343,84 @@ pub(super) fn merge(kept: Vec<Written>, enums: Vec<Written>) -> Vec<Written> {
             kept
         })
         .collect()
+}
+
+/// A module from its parts (`Gen::module`), in their order, each written by a generator of its
+/// own: the items one after another, and what the items name, the extension traits they call
+/// and what they reject, together. A part starts as a module does, after nothing, so where the
+/// item before it ends a statement or a block, its first item, a function, which starts with a
+/// `gap`, gets the blank line that writing the module whole puts there. With `--timings`, the
+/// crate root's `--timings` line.
+pub(super) fn join_parts(class: &Class, parts: Vec<Written>) -> Written {
+    let mut parts = parts.into_iter();
+    let mut whole = parts.next().expect("a module has a part");
+    for part in parts {
+        let mut items = part.items.into_iter();
+        if let Some(mut first) = items.next() {
+            if whole.items.last().is_some_and(|before| ends_statement(&before.text)) {
+                first.text.insert(0, '\n');
+            }
+            whole.items.push(first);
+        }
+        whole.items.extend(items);
+        whole.imports.extend(part.imports);
+        whole.traits.extend(part.traits);
+        whole.rejected.extend(part.rejected);
+        whole.times.extend(part.times);
+    }
+    if !whole.times.is_empty() {
+        Gen::piece_timing(class, std::mem::take(&mut whole.times));
+    }
+    whole
+}
+
+/// A module as the tree holds it, from what was written of it (`Gen::finish`): its `use` lines,
+/// with the crate root's items it names through them (`roots` are the root's modules), and its
+/// items; and the methods written with a call that throws inside a closure, in its items' order.
+fn finish_module(module: Written, roots: &BTreeSet<String>) -> (Module, Vec<Error>) {
+    let mut closures = Vec::new();
+    let Written { package, path, items, imports, traits, .. } = module;
+    let text: String = items.iter().map(|item| item.text.as_str()).collect();
+    let mut uses = use_lines(&text);
+    drop(text);
+    // The modules it names through their own names, and the extension traits whose
+    // methods it calls, from the crate root.
+    let mut crate_uses = with(|r| r.use_lines(&package, &imports)).unwrap_or_default();
+    for trait_path in &traits {
+        let absolute = with(|r| r.absolute_path(trait_path)).unwrap_or_else(|| trait_path.clone());
+        crate_uses.push_str(&format!("use {absolute};\n"));
+    }
+    let mut texts = Vec::with_capacity(items.len());
+    let mut rest = Vec::with_capacity(items.len());
+    for item in items {
+        texts.push(item.text);
+        closures.extend(item.closures);
+        rest.push((item.origin, item.named));
+    }
+    // The crate root's items, in a package's module, by their names where nothing else
+    // has them.
+    if !package.is_empty() {
+        let taken: BTreeSet<String> = uses
+            .iter()
+            .chain([&crate_uses])
+            .flat_map(|group| group.lines())
+            .filter_map(|line| line.trim_end_matches(';').rsplit([':', ' ']).next())
+            .map(str::to_string)
+            .collect();
+        crate_uses.push_str(&imports::import_root_items(&mut texts, roots, &taken));
+    }
+    if !crate_uses.is_empty() {
+        let mut lines: Vec<&str> = crate_uses.lines().collect();
+        lines.sort_unstable();
+        lines.dedup();
+        uses.push(lines.iter().map(|line| format!("{line}\n")).collect());
+    }
+    let items = rest
+        .into_iter()
+        .zip(texts)
+        .map(|((origin, (refers, names)), text)| Item { origin, text, refers, names })
+        .collect();
+    (Module { package, path, uses, items }, closures)
 }
 
 /// What an item's text ends with as far as the next item's `gap` sees it.
@@ -328,7 +453,7 @@ pub(super) fn split(name: &str) -> (String, &str) {
         return (if nested == Some(true) { "crate::".to_string() } else { String::new() }, simple);
     }
     with(|r| {
-        let package = r.packages.get(name)?.clone();
+        let package = r.fixed.packages.get(name)?.clone();
         if r.current.is_some() {
             r.names.insert(name.to_string());
         }
@@ -349,6 +474,14 @@ pub(super) struct Plan {
 }
 
 impl Plan {
+    /// The ranges of the module's methods whose functions a part of it holds (`Gen::module`):
+    /// one for all of them, or, `cut`, one for each `PART_FUNCTIONS`.
+    pub(super) fn parts(&self, cut: bool) -> Vec<std::ops::Range<usize>> {
+        let n = self.methods.len();
+        let size = if cut { PART_FUNCTIONS } else { n.max(1) };
+        (0..n.max(1)).step_by(size).map(|at| at..(at + size).min(n)).collect()
+    }
+
     /// The module's package: empty for the crate root.
     pub(super) fn package(&self) -> &str {
         &self.package
@@ -405,8 +538,9 @@ pub(super) fn plans(class: &Class) -> Vec<Plan> {
 /// package (the JDK's own, translated from its sources, are in theirs).
 fn at_root(name: &str) -> bool {
     let provided = crate::lower::is_functional(name)
-        && RESOLVER
-            .with_borrow(|r| r.as_ref().is_none_or(|r| r.packages.get(name).is_some_and(String::is_empty)));
+        && RESOLVER.with_borrow(|r| {
+            r.as_ref().is_none_or(|r| r.fixed.packages.get(name).is_some_and(String::is_empty))
+        });
     crate::lower::is_standard(name) || provided
 }
 
@@ -417,7 +551,8 @@ pub(super) fn name_in_package(name: &str) -> &str {
     if at_root(name) {
         return crate::lower::standard_local_name(name);
     }
-    let package = RESOLVER.with_borrow(|r| r.as_ref().and_then(|r| r.packages.get(name).map(String::len)));
+    let package =
+        RESOLVER.with_borrow(|r| r.as_ref().and_then(|r| r.fixed.packages.get(name).map(String::len)));
     match package {
         Some(len) if len > 0 => &name[len + 1..],
         _ => name,
@@ -529,52 +664,15 @@ impl<'a> Gen<'a> {
     /// with a call that throws inside a closure (`Gen::closures`), in the order of the items.
     pub(super) fn finish(&mut self, header: String, written: Vec<Written>) -> (ModuleTree, Vec<Error>) {
         let packages = all_packages(self.class);
+        let roots: BTreeSet<String> =
+            packages.iter().filter(|p| !p.contains('.')).map(|p| module_name(p)).collect();
         let mut tree = ModuleTree { header, modules: Vec::new(), footer: allocator() };
         let mut closures = Vec::new();
-        for module in written {
-            let Written { package, path, items, imports, traits, .. } = module;
-            let text: String = items.iter().map(|item| item.text.as_str()).collect();
-            let mut uses = use_lines(&text);
-            drop(text);
-            // The modules it names through their own names, and the extension traits whose
-            // methods it calls, from the crate root.
-            let mut crate_uses = with(|r| r.use_lines(&package, &imports)).unwrap_or_default();
-            for trait_path in &traits {
-                let absolute = with(|r| r.absolute_path(trait_path)).unwrap_or_else(|| trait_path.clone());
-                crate_uses.push_str(&format!("use {absolute};\n"));
-            }
-            let mut texts = Vec::with_capacity(items.len());
-            let mut rest = Vec::with_capacity(items.len());
-            for item in items {
-                texts.push(item.text);
-                closures.extend(item.closures);
-                rest.push((item.origin, item.named));
-            }
-            // The crate root's items, in a package's module, by their names where nothing else
-            // has them.
-            if !package.is_empty() {
-                let taken: BTreeSet<String> = uses
-                    .iter()
-                    .chain([&crate_uses])
-                    .flat_map(|group| group.lines())
-                    .filter_map(|line| line.trim_end_matches(';').rsplit([':', ' ']).next())
-                    .map(str::to_string)
-                    .collect();
-                let roots = packages.iter().filter(|p| !p.contains('.')).map(|p| module_name(p)).collect();
-                crate_uses.push_str(&imports::import_root_items(&mut texts, &roots, &taken));
-            }
-            if !crate_uses.is_empty() {
-                let mut lines: Vec<&str> = crate_uses.lines().collect();
-                lines.sort_unstable();
-                lines.dedup();
-                uses.push(lines.iter().map(|line| format!("{line}\n")).collect());
-            }
-            let items = rest
-                .into_iter()
-                .zip(texts)
-                .map(|((origin, (refers, names)), text)| Item { origin, text, refers, names })
-                .collect();
-            tree.modules.push(Module { package, path, uses, items });
+        // The modules' texts are looked through on the generator's threads: on one, the Minecraft
+        // server's took seconds.
+        for (module, found) in super::threads::on_each(written, |module| finish_module(module, &roots)) {
+            tree.modules.push(module);
+            closures.extend(found);
         }
         // The classes as values, which every module may name, once each at the crate root, and
         // each class and the names above it by its number. The table of classes names the
@@ -653,10 +751,19 @@ impl<'a> Gen<'a> {
 
     /// The module of `plan`, before its `use` lines are found (`finish`). With `kept_module`,
     /// the first round's, only the enum items of class types, which go among its items
-    /// (`merge`).
-    pub(super) fn module(&mut self, plan: &Plan, live: &[bool], kept_module: Option<&Written>) -> Written {
+    /// (`merge`). Of the free functions, those of `functions`, a range of the plan's methods
+    /// (`Plan::parts`): the pieces before the functions only where it starts them, and `main`
+    /// only where it ends them; the parts of a module are joined by `join_parts`.
+    pub(super) fn module(
+        &mut self,
+        plan: &Plan,
+        live: &[bool],
+        kept_module: Option<&Written>,
+        functions: std::ops::Range<usize>,
+    ) -> Written {
         let class = self.class;
         let Plan { package, path, types, methods } = plan;
+        let (head, tail) = (functions.start == 0, functions.end == methods.len());
         set_current(package);
         let outer = std::mem::take(&mut self.out);
         let outer_traits = std::mem::take(&mut self.traits);
@@ -685,7 +792,7 @@ impl<'a> Gen<'a> {
                 g.closures = closures;
             }
         };
-        if self.only_enums.is_none() {
+        if self.only_enums.is_none() && head {
             for &index in types.iter().filter(|&&index| live[index]) {
                 write(self, Piece::Class(index), &mut items);
             }
@@ -695,7 +802,7 @@ impl<'a> Gen<'a> {
         if let Some(before) = kept_module.and_then(|m| m.enums_at.checked_sub(1).map(|i| &m.items[i].text)) {
             self.out.push_str(ending(before));
         }
-        for &index in types.iter() {
+        for &index in types.iter().filter(|_| head) {
             if self.wanted.contains(&Need::Enum(index))
                 && self.only_enums.as_ref().is_none_or(|only| only.types.contains(&index))
             {
@@ -703,20 +810,22 @@ impl<'a> Gen<'a> {
             }
         }
         if self.only_enums.is_none() {
-            for &index in types.iter().filter(|&&index| class.types[index].enum_constants.is_some()) {
-                write(self, Piece::Enum(index), &mut items);
+            if head {
+                for &index in types.iter().filter(|&&index| class.types[index].enum_constants.is_some()) {
+                    write(self, Piece::Enum(index), &mut items);
+                }
+                write(self, Piece::Statics, &mut items);
+                write(self, Piece::Monitors, &mut items);
             }
-            write(self, Piece::Statics, &mut items);
-            write(self, Piece::Monitors, &mut items);
-            for &index in methods.iter() {
+            for &index in &methods[functions] {
                 if self.emitted_free(index) {
                     write(self, Piece::Function(index), &mut items);
                 }
             }
             let main = class.methods.iter().position(|m| m.is_main);
-            if let Some(main) = main
-                .filter(|&m| package.is_empty() && !class.types[class.methods[m].class].package.is_empty())
-            {
+            if let Some(main) = main.filter(|&m| {
+                tail && package.is_empty() && !class.types[class.methods[m].class].package.is_empty()
+            }) {
                 write(self, Piece::Main(main), &mut items);
             }
         }
@@ -734,9 +843,6 @@ impl<'a> Gen<'a> {
                 replaces = true;
             }
         }
-        if let Some(times) = times {
-            self.piece_timing(times);
-        }
         self.out = outer;
         let traits = std::mem::replace(&mut self.traits, outer_traits);
         let imports = with(|r| std::mem::take(&mut r.imports)).unwrap_or_default();
@@ -749,14 +855,14 @@ impl<'a> Gen<'a> {
             traits,
             replaces,
             rejected: std::mem::take(&mut self.rejected),
+            times: times.unwrap_or_default(),
         }
     }
 
     /// The `--timings` line of the pieces of the crate root that took longest to write.
-    fn piece_timing(&self, mut times: Vec<(std::time::Duration, Piece)>) {
+    fn piece_timing(class: &Class, mut times: Vec<(std::time::Duration, Piece)>) {
         let all: std::time::Duration = times.iter().map(|(time, _)| *time).sum();
         times.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
-        let class = self.class;
         let slowest: Vec<String> = times
             .iter()
             .take(5)
