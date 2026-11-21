@@ -2128,6 +2128,50 @@ fn translate_whole(name: &str, java: &str) -> String {
 }
 
 #[test]
+fn a_constructor_whose_calls_reach_no_thread_start_by_the_points_to_facts_keeps_its_fields_fixed() {
+    // `State`'s constructor hands `this` to `Light.of`, and one class of `Light` starts a thread;
+    // but only a `Plain` ever reaches `Block.light`, so the call cannot start one, and the fields
+    // of the shared `State` written after `this` leaves are fixed all the same.
+    let rust = translate_whole(
+        "thread-starts-by-receivers",
+        "public class Main {
+            interface Light { int of(Object state); }
+            static final class Plain implements Light { public int of(Object s) { return 1; } }
+            static final class Starter implements Light {
+                public int of(Object s) {
+                    Thread t = new Thread(() -> System.out.println(\"started\"));
+                    t.start();
+                    try { t.join(); } catch (InterruptedException e) { }
+                    return 2;
+                }
+            }
+            static final class Block { final Light light; Block(Light light) { this.light = light; } }
+            static final class State {
+                final Block owner;
+                final int emission;
+                final StringBuilder name;
+                State(Block owner) {
+                    this.owner = owner;
+                    this.emission = owner.light.of(this);
+                    this.name = new StringBuilder(\"s\");
+                }
+                int read() { return emission + name.length(); }
+            }
+            public static void main(String[] args) throws InterruptedException {
+                State s = new State(new Block(new Plain()));
+                Thread reader = new Thread(() -> System.out.println(s.read()));
+                reader.start();
+                reader.join();
+                Light other = new Starter();
+                System.out.println(other.of(s));
+            }
+        }",
+    );
+    assert_contains(&rust, &["emission.fixed()", "name.fixed()"]);
+    assert_lacks(&rust, &["emission.get()", "name.get()"]);
+}
+
+#[test]
 fn a_call_whose_receiver_is_of_one_class_runs_its_method_with_no_test() {
     let rust = translate_whole(
         "one-class-receivers",
