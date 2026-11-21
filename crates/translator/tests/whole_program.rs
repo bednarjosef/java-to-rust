@@ -1818,6 +1818,79 @@ fn atomics_that_one_thread_uses_run_confined_forms() {
     assert!(!shared.is_empty() && shared.iter().all(|l| !l.contains("_confined")), "{shared:?}");
 }
 
+/// `Objects.equals`, `hashCode` and `hash` of values whose types the call knows are written in
+/// place (docs/native-speed.md, "Objects.equals, hashCode and hash in place"): the object's own
+/// `equals` or `hashCode` is called on its static type, not the JDK's method on two `Object`s, and
+/// `hash` packs no array.
+const OBJECTS_IN_PLACE: &str = r#"
+import java.util.Objects;
+
+public class Main {
+    static final class Pos {
+        final int x;
+        Pos(int x) { this.x = x; }
+        @Override public boolean equals(Object o) { return o instanceof Pos p && p.x == x; }
+        @Override public int hashCode() { return x * 31; }
+    }
+
+    static Pos last = new Pos(0);
+
+    static boolean sameAsLast(Pos p) { return Objects.equals(last, p); }
+
+    static int hashOfLast() { return Objects.hashCode(last); }
+
+    static int hashOfAll(Pos p, int n) { return Objects.hash(p, n, "k"); }
+
+    public static void main(String[] args) {
+        Pos p = new Pos(args.length);
+        System.out.println(sameAsLast(p) + " " + hashOfLast() + " " + hashOfAll(p, 2));
+    }
+}
+"#;
+
+#[test]
+fn objects_calls_on_known_types_are_written_in_place() {
+    let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
+        println!("skipped: set JAVA_BASE_SOURCES to the source root of java.base to run this program");
+        return;
+    };
+    let work = Path::new(env!("CARGO_TARGET_TMPDIR")).join("whole-program-objects-in-place");
+    let sources = work.join("src");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(sources.join("Main.java"), OBJECTS_IN_PLACE).unwrap();
+    let translated = Command::new(env!("CARGO_BIN_EXE_java-to-rust"))
+        .args(["--main", "Main", "--source"])
+        .arg(&sources)
+        .arg("--library")
+        .arg(library)
+        .arg("-o")
+        .arg(work.join("main.rs"))
+        .output()
+        .unwrap();
+    assert!(translated.status.success(), "{}", String::from_utf8_lossy(&translated.stderr));
+    let rust = std::fs::read_to_string(work.join("main.rs")).unwrap();
+    let body = |name: &str| {
+        let start = rust.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("no {name} in:\n{rust}"));
+        let body = &rust[start..];
+        &body[..body[1..].find("\nfn ").map_or(body.len(), |end| end + 1)]
+    };
+    // `last == p || last != null && last.equals(p)`, with `Pos`'s own `equals`.
+    let same = body("same_as_last");
+    assert!(same.contains(".equals("), "{same}");
+    // `last != null ? last.hashCode() : 0`, and `hash` of each value, with no array.
+    let hash = body("hash_of_last");
+    assert!(hash.contains(".hash_code()"), "{hash}");
+    let all = body("hash_of_all");
+    assert!(all.contains("p.hash_code()") && all.contains("java::string_hash("), "{all}");
+    for body in [same, hash, all] {
+        assert!(
+            !body.contains("util::") && !body.contains("Array"),
+            "the JDK's `Objects` is called:\n{body}"
+        );
+    }
+}
+
 /// Handles held as values that lowering does not follow are rejected: an access through a handle
 /// that may be null whose arguments do something before Java's null check, and a handle kept as
 /// an `Object`. (A lookup of a method other than the handle factories throws when it runs, which
