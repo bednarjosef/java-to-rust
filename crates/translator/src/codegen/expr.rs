@@ -569,6 +569,7 @@ impl<'a> Gen<'a> {
                     None => self.static_call(index, args),
                 };
                 self.plain_call = outer_plain;
+                self.entry_call(e.id, index);
                 self.raising(code, index)
             }
             // A getter's call on an object on the stack, whose field a local took from its slot.
@@ -627,6 +628,9 @@ impl<'a> Gen<'a> {
             }
             self.method_call(receiver, target, args)
         };
+        if self.class.methods[index].is_static {
+            self.entry_call(e.id, index);
+        }
         self.raising(code, index)
     }
 

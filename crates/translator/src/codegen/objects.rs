@@ -1435,8 +1435,8 @@ impl<'a> Gen<'a> {
                     self.need(Need::Convert(s, t));
                     Some(format!("{handle}.{}()", self.to_name(t)))
                 }
-                (None, Some(c)) => Some(match self.variant_of(t, c) {
-                    Some(variant) => format!("{variant}({handle}.clone())"),
+                (None, Some(c)) => Some(match self.variant_of(t, c, &format!("{handle}.clone()")) {
+                    Some(variant) => variant,
                     // No object of the class is created (none is a value of the enum), so the
                     // call never runs, as `as_enum` writes it.
                     None => {
@@ -1938,7 +1938,8 @@ impl<'a> Gen<'a> {
         // the initialization does; the constructor initializes it again, which does nothing.
         let init = self.init_call(self.class.methods[ctor].class).filter(|_| args.iter().any(sees_statics));
         let args = self.call_args(ctor, args).join(", ");
-        let path = self.qualified_fn(ctor);
+        self.entry_call(id, ctor);
+        let path = self.qualified_fn(ctor) + self.entry_suffix(ctor);
         let path = match path.rsplit_once("::") {
             Some((owner, name)) if !turbofish.is_empty() => format!("{owner}{turbofish}::{name}"),
             _ => path,
@@ -2019,7 +2020,7 @@ impl<'a> Gen<'a> {
             object
         };
         Code::atom(match rep {
-            Some(t) => format!("{}({object})", self.variant(t, c)),
+            Some(t) => self.variant(t, c, &object),
             None => object,
         })
     }
@@ -2784,12 +2785,12 @@ impl<'a> Gen<'a> {
         match delegate {
             Some((args, index)) => {
                 let args = self.call_args(index, args).join(", ");
+                // The constructor's own class is initialized: this one runs in it.
+                let path = self.qualified_fn(index) + self.entry_suffix(index);
                 let call = match self.on_stack {
-                    true if args.is_empty() => {
-                        format!("{}_on_stack({})", self.qualified_fn(index), self.slot_param)
-                    }
-                    true => format!("{}_on_stack({}, {args})", self.qualified_fn(index), self.slot_param),
-                    false => format!("{}({args})", self.qualified_fn(index)),
+                    true if args.is_empty() => format!("{path}_on_stack({})", self.slot_param),
+                    true => format!("{path}_on_stack({}, {args})", self.slot_param),
+                    false => format!("{path}({args})"),
                 };
                 let call = Code::atom(call);
                 let call = self.raising(call, index).text;
@@ -2877,7 +2878,9 @@ impl<'a> Gen<'a> {
         match (hierarchy::embedded(self.facts, self.class, t), resolved) {
             (Some(_), Some(ctor)) => {
                 let args = self.call_args(*ctor, args).join(", ");
-                let call = Code::atom(format!("{}({args})", self.qualified_fn(*ctor)));
+                // The superclass is initialized: its subclass, whose constructor runs, is.
+                let path = self.qualified_fn(*ctor) + self.entry_suffix(*ctor);
+                let call = Code::atom(format!("{path}({args})"));
                 (Some(self.raising(call, *ctor).text), rest)
             }
             _ => {

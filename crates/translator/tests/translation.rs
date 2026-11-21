@@ -1082,9 +1082,10 @@ fn superclass_static_initialization_runs_first() {
         }
         class A { public static void main(String[] a) { System.out.println(new Sub().both()); } }",
     );
+    // `make` is Base's, which `init_sub` has initialized: it is called without the check.
     assert_contains(
         &rust,
-        &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make(java::wtf8(\"sub\")));"],
+        &["fn init_sub() {", "    init_base();\n    SUB_OTHER.set(make__initialized(java::wtf8(\"sub\")));"],
     );
 }
 
@@ -1150,7 +1151,7 @@ fn inherited_bodies_that_dispatch_live_on_the_enum() {
             "fn Base__to_string_in_base(this: Base) -> java::JString {",
             "java::concat!((*this.base().name.fixed()).clone(), format_args!(\":{}\", java::Double(Base__area(this))))",
             // `super.toString()` wraps the subclass's object in the enum to call the body there.
-            "Base__to_string_in_base(Base::Circle(this.clone()))",
+            "Base__to_string_in_base(Base(java::Thin::pointer::<Arc<Circle>>(2, this.clone())))",
             "impl fmt::Display for Base {",
             "3 => fmt::Display::fmt(&Base__to_string_in_base(*self), f),",
         ],
@@ -1195,10 +1196,13 @@ fn upcasts_wrap_the_handle() {
     let rust = translate(TREE);
     assert_contains(
         &rust,
-        &["let b = Base::Circle(c.clone());", "let r = Base::Rect(Arc::new(Rect__new(2.0, 3.0)));"],
+        &[
+            "let b = Base(java::Thin::pointer::<Arc<Circle>>(2, c.clone()));",
+            "let r = Base(java::Thin::pointer::<Arc<Rect>>(3, Arc::new(Rect__new(2.0, 3.0))));",
+        ],
     );
     // The last use of `c` moves it into the enum.
-    assert_contains(&rust, &["let last = Base::Circle(c);"]);
+    assert_contains(&rust, &["let last = Base(java::Thin::pointer::<Arc<Circle>>(2, c));"]);
 }
 
 #[test]
@@ -1280,7 +1284,7 @@ fn a_class_that_is_upcast_is_shared() {
         &[
             "enum ShapeView {\n    Square(Arc<Square>) = 2,\n    Tri(Arc<Tri>) = 3,\n}",
             "let s = slot_1.put(Square__new());",
-            "total(&Shape::Square(s.clone()), &Shape::Tri(t))",
+            "total(&Shape(java::Thin::pointer::<Arc<Square>>(2, s.clone())), &Shape(java::Thin::pointer::<Arc<Tri>>(3, t)))",
         ],
     );
 }
@@ -1462,10 +1466,10 @@ fn hashing_an_object_by_its_own_hash_code_does_not_keep_it_on_the_heap() {
         &[
             // `bucket` reads what the object's class runs for `hashCode`: a `P`'s reads no
             // identity hash, so it is moved where it leaves.
-            "let mut p = P::P(slot_1.put(PFields__new(i)));",
+            "let mut p = P(java::Thin::pointer::<Arc<PFields>>(1, slot_1.put(PFields__new(i))));",
             "unsafe { slot_1.to_heap(&mut p) };",
             // A `Q`'s reads its identity hash, so it is made in the heap.
-            "let q = P::Q(Arc::new(Q__new(i)));",
+            "let q = P(java::Thin::pointer::<Arc<Q>>(2, Arc::new(Q__new(i))));",
         ],
     );
 }
@@ -1513,7 +1517,7 @@ fn a_call_on_an_object_of_one_class_returns_only_what_that_class_returns() {
             // cursor's `next()` returns is kept and the cursor stays.
             "let c = same(Bag__cursor_on_stack(&bag, &slot_2));",
             // What a `Countdown`'s `next()` returns is the `Countdown`, which is kept.
-            "let d = same(Cursor::Countdown(Arc::new(Countdown__new())));",
+            "let d = same(Cursor(java::Thin::pointer::<Arc<Countdown>>(3, Arc::new(Countdown__new()))));",
         ],
     );
 }
@@ -2086,7 +2090,7 @@ fn object_varargs_are_a_slice_of_the_object_enum() {
         &rust,
         &[
             "fn log(f: &java::Wtf8, xs: &[Object]) {",
-            "log(java::wtf8(\"x\"), &[Object::Integer(1), Object::String(java::JString::from(\"two\"))]);",
+            "log(java::wtf8(\"x\"), &[Object(java::Thin::value::<i32>(3, 1)), Object(java::Thin::value::<java::JString>(2, java::JString::from(\"two\")))]);",
         ],
     );
 }
@@ -2824,6 +2828,96 @@ fn a_class_initialized_by_an_earlier_statement_is_not_checked_again() {
             "let r = || { java::println!(\"{}\", { init_helper(); HELPER_MADE.get() }); };",
         ],
     );
+}
+
+#[test]
+fn a_known_initialized_class_is_called_without_its_check() {
+    let rust = translate(
+        "class Vec {
+            static int made;
+            static { System.out.println(\"vec\"); }
+            final int x, y;
+            Vec(int x, int y) { this.x = x; this.y = y; made++; }
+        }
+        class Pos extends Vec {
+            static final Pos ORIGIN;
+            static { ORIGIN = new Pos(0, 0); System.out.println(\"pos\"); }
+            Pos(int x, int y) { super(x, y); }
+            Pos above() { return new Pos(x, y + 1); }
+            static int pack(int x, int y) { return x * 31 + y; }
+        }
+        class World {
+            static int walk(int n) {
+                int sum = 0;
+                for (int i = 0; i < n; i++) {
+                    Pos p = new Pos(i, i);
+                    sum += Pos.pack(p.x, p.y);
+                    sum += Pos.pack(p.above().x, 0) + Vec.made;
+                }
+                return sum;
+            }
+        }
+        public class A {
+            public static void main(String[] args) { System.out.println(World.walk(3)); }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // A static method or constructor that another class calls checks its class in a
+            // function of its own name, which calls the one with its code.
+            "fn Pos__new(x: i32, y: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x, y)\n}",
+            // Every call of `pack` follows a `new Pos`: only the function without the check.
+            "fn pack__initialized(x: i32, y: i32) -> i32 {",
+            // `super(..)` initializes nothing, and Vec is initialized before Pos.
+            "Pos { base: Vec_Fields__new__initialized(x, y) }",
+            // Pos's own code knows Pos is initialized.
+            "Arc::new(Pos__new__initialized(self.base.x, self.base.y.wrapping_add(1)))",
+            "POS_ORIGIN.set(Some(Arc::new(Pos__new__initialized(0, 0))));",
+            // After the statement that made a Pos, neither Pos nor its superclass is checked.
+            "let p = slot_1.put(Pos__new(i, i));",
+            "sum = sum.wrapping_add(pack__initialized(p_x, p_y));",
+            "pack__initialized(p.above_on_stack(&slot_2).base.x, 0).wrapping_add(VEC_MADE.get())",
+        ],
+    );
+    assert_lacks(&rust, &["init_vec(); VEC_MADE", "fn pack("]);
+}
+
+#[test]
+fn a_class_check_is_split_off_only_where_both_kinds_of_call_exist() {
+    let rust = translate(
+        "class Vec {
+            static int made;
+            static { System.out.println(\"vec\"); }
+            final int x;
+            Vec(int x) { this.x = x; made++; }
+        }
+        class Pos extends Vec {
+            static { System.out.println(\"pos\"); }
+            Pos(int x) { super(x); }
+            Pos next() { return new Pos(x + 1); }
+            static int once(int v) { return v * 3; }
+        }
+        public class A {
+            public static void main(String[] args) {
+                System.out.println(new Pos(1).next().x + Pos.once(2));
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            // Pos's constructor is called with its check (from A) and without (from Pos's own
+            // code): two functions.
+            "fn Pos__new(x: i32) -> Pos {\n    init_pos();\n    Pos__new__initialized(x)\n}",
+            // Nothing calls `once` without its check: one function, which runs the check.
+            "fn once(v: i32) -> i32 {\n    init_pos();\n",
+            // Only `super(..)` calls Vec's constructor, without its check.
+            "Pos { base: Vec_Fields__new__initialized(x) }",
+        ],
+    );
+    // The split that stays keeps no trace of the marker that found it.
+    assert_lacks(&rust, &["once__initialized", "fn Vec_Fields__new(", "entry_check"]);
 }
 
 #[test]
@@ -5921,7 +6015,7 @@ fn natives_of_jdk_classes_become_runtime_calls() {
     // the native declarations nor the methods replaced at their calls are translated.
     assert_lacks(
         &rust,
-        &["register_natives", "initialize", "from_archive", "fn array_base_offset", "fn array_index_scale"],
+        &["register_natives", "initialize(", "from_archive", "fn array_base_offset", "fn array_index_scale"],
     );
 }
 
@@ -6213,7 +6307,7 @@ fn an_interface_is_an_enum_over_its_implementors() {
         &[
             "enum ShapeView<'a> {\n    Circle(Arc<Circle>) = 1,\n    Rect(Arc<RectFields>) = 2,\n    Square(Arc<Square>) = 3,\n    Color(&'a Color) = 6,\n}",
             "        3 => { let o: &Arc<Square> = &unsafe { this.0.to_pointer() }; o.base.area() }\n        6 => { let o: &Color = unsafe { this.0.as_value() }; (*o).area() }",
-            "Shape::Circle(slot_2.put(Circle__new(1.0))), Shape::Rect(r.clone())",
+            "Shape(java::Thin::pointer::<Arc<Circle>>(1, slot_2.put(Circle__new(1.0)))), Shape(java::Thin::pointer::<Arc<RectFields>>(2, r.clone()))",
             "{ let address = Arc::as_ptr(&r); matches!((&s).view(), ShapeView::Rect(ref b) if std::ptr::addr_eq(address, Arc::as_ptr(b))) }",
         ],
     );
@@ -6253,7 +6347,7 @@ fn an_enum_constant_implements_an_interface() {
         &[
             "    Color(&'a Color) = 6,",
             "impl PartialEq for Shape {\n    fn eq(&self, other: &Shape) -> bool {\n        self.0 == other.0\n    }",
-            "let c = Shape::Color(Color::Blue);",
+            "let c = Shape(java::Thin::value::<Color>(6, Color::Blue));",
             "    fn area(self) -> f64 {",
         ],
     );
@@ -6324,7 +6418,7 @@ fn a_method_whose_exception_is_caught_returns_a_result() {
         &rust,
         &[
             "fn find(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
-            "Err({ let x = x; java::cold(|| Throwable::Missing(Arc::new(",
+            "Err({ let x = x; java::cold(|| Throwable(java::Thin::pointer::<Arc<Missing>>(4, Arc::new(",
             "fn twice(xs: &[i32], x: i32) -> Result<i32, Throwable> {",
             "match find(xs, x) { Ok(v) => v, Err(e) => return Err(e) }",
             "Err(caught) => {",
@@ -6433,9 +6527,9 @@ fn a_thrown_exception_whose_message_can_throw_is_made_out_of_line() {
         &[
             // A message with a quote in a literal, and no call that throws. The closure borrows a
             // copy of `code` made where it runs, so `code` itself stays in a register.
-            "Err({ let code = code; java::cold(|| Throwable::Refused(",
+            "Err({ let code = code; java::cold(|| Throwable(java::Thin::pointer::<Arc<Refused>>(4, ",
             // The call in the message throws out of the closure, as out of the method.
-            "Err({ let code = code; java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable::Refused(",
+            "Err({ let code = code; java::cold_or_raised(|| -> Result<Throwable, Throwable> { Ok(Throwable(java::Thin::pointer::<Arc<Refused>>(4, ",
             "match describe(code) { Ok(v) => v, Err(e) => return Err(e) }",
         ],
     );
@@ -6462,7 +6556,7 @@ fn an_exception_that_nothing_catches_ends_the_program_where_it_is_thrown() {
         &rust,
         &[
             "fn check(x: i32) -> i32 {",
-            "java::throw_uncaught({ let x = x; java::cold(|| Throwable::IllegalArgumentException(",
+            "java::throw_uncaught({ let x = x; java::cold(|| Throwable(java::Thin::pointer::<Arc<IllegalArgumentException>>(5, ",
         ],
     );
     assert_lacks(&rust, &["Result<", "'attempt"]);
@@ -6546,7 +6640,7 @@ fn a_finally_runs_after_the_block_and_then_the_exception_goes_on() {
         &[
             "fn withdraw(amount: i32) -> Result<(), Throwable> {",
             "let attempt: Result<(), Throwable> = 'attempt: {",
-            "break 'attempt Err(java::cold(|| Throwable::IllegalStateException(",
+            "break 'attempt Err(java::cold(|| Throwable(java::Thin::pointer::<Arc<IllegalStateException>>(5, ",
             "match attempt { Ok(v) => v, Err(e) => return Err(e) };",
         ],
     );
@@ -6925,7 +7019,7 @@ fn a_constructor_that_throws_returns_a_result_that_new_passes_on() {
         &rust,
         &[
             "fn ARange__new_i32_i32(low: i32, high: i32) -> Result<ARange, Throwable> {",
-            "return Err(java::cold(|| Throwable::IllegalArgumentException(",
+            "return Err(java::cold(|| Throwable(java::Thin::pointer::<Arc<IllegalArgumentException>>(6, ",
             // A constructor that only delegates returns the other's `Result`.
             "fn ARange__new_i32(high: i32) -> Result<ARange, Throwable> {\n    ARange__new_i32_i32(0, high)\n}",
             "match ARange__new_i32(args.len() as i32 - 1) { Ok(v) => v, Err(e) => break 'attempt Err(e) }",
@@ -7128,8 +7222,8 @@ fn object_values_are_an_enum() {
         &rust,
         &[
             "enum ObjectView<'a> {\n    Key(Arc<Key>) = 1,\n    Plain(Arc<Plain>) = 2,\n    String(&'a java::JString) = 4,\n    Integer(&'a i32) = 5,\n}",
-            "let s = Object::String(java::JString::from(\"text\"));",
-            "let n = Object::Integer(5);",
+            "let s = Object(java::Thin::value::<java::JString>(4, java::JString::from(\"text\")));",
+            "let n = Object(java::Thin::value::<i32>(5, 5));",
             "let back = java::cast(&n, |o| o.as_integer(), &(\"java.lang.Integer\", java::BASE));",
             "if let Some(s) = o.as_string() {",
         ],
@@ -7261,8 +7355,8 @@ fn type_variables_erase_to_object() {
             "struct Box_ {\n    value: java::Field<Object>,\n}",
             "fn get(&self) -> Object {",
             "fn set(&self, v: Object) {",
-            "Box___new(Object::Integer(3))",
-            "b.set(Object::Integer(x));",
+            "Box___new(Object(java::Thin::value::<i32>(8, 3)))",
+            "b.set(Object(java::Thin::value::<i32>(8, x)));",
         ],
     );
 }
@@ -7368,7 +7462,7 @@ fn an_array_held_as_an_object_is_a_shared_variant_compared_by_identity() {
         &rust,
         &[
             "IntArray(java::Array<i32>) = 11,",
-            "let held = Object::IntArray(cell.clone());",
+            "let held = Object(java::Thin::pointer::<java::Array<i32>>(11, cell.clone()));",
             "java::cast(&held, |o| o.as_int_array(), &(\"[I\", java::BASE))",
             "fn eq(&self, other: &Object) -> bool {",
             "self.0 == other.0",
@@ -7422,7 +7516,7 @@ fn a_string_array_passed_for_a_type_variables_array_is_an_object_array_copied_at
         &[
             "String(&'a java::JString) = 2,",
             "fn first(a: &[Object]) -> Object {",
-            "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object::String(s.clone())).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| &const { java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || &java::Class::STRING) }, \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()), &[\"[Ljava.lang.String;\", \"[Ljava.io.Serializable;\", \"[Ljava.lang.Comparable;\", \"[Ljava.lang.CharSequence;\", \"[Ljava.lang.constant.Constable;\", \"[Ljava.lang.constant.ConstantDesc;\", \"[Ljava.lang.Object;\", \"java.lang.Cloneable\", \"java.io.Serializable\", \"java.lang.Object\"]).fitting(|o| o.as_string().is_some())));",
+            "let words: java::Array<Object> = java::tagged(java::from_vec((&java::from_vec(java::split(java::wtf8(\"b a\"), java::wtf8(\" \"), 0)).borrow()).iter().map(|s| Object(java::Thin::value::<java::JString>(2, s.clone()))).collect::<Vec<_>>()), Some(java::ElementClass::<Object>::new(|| &const { java::Class::array(\"[Ljava.lang.String;\", \"String[]\", || &java::Class::STRING) }, \"java.lang.String\", java::BASE, |v| Some(v.runtime_type_names()), &[\"[Ljava.lang.String;\", \"[Ljava.io.Serializable;\", \"[Ljava.lang.Comparable;\", \"[Ljava.lang.CharSequence;\", \"[Ljava.lang.constant.Constable;\", \"[Ljava.lang.constant.ConstantDesc;\", \"[Ljava.lang.Object;\", \"java.lang.Cloneable\", \"java.io.Serializable\", \"java.lang.Object\"]).fitting(|o| o.as_string().is_some())));",
             "java::join(java::wtf8(\",\"), &java::from_vec((&words.borrow()).iter().map(|s| java::cast(&s, |o| o.as_string(), &(\"java.lang.String\", java::BASE))).collect::<Vec<_>>()).borrow())",
         ],
     );
@@ -7446,7 +7540,7 @@ fn an_enum_array_passed_for_a_type_variables_array_is_an_object_array_of_its_con
     assert_contains(
         &rust,
         &[
-            "let days: Vec<Option<Object>> = vec![Some(Object::Day(MainDay::Mon)), Some(Object::Day(MainDay::Tue))];",
+            "let days: Vec<Option<Object>> = vec![Some(Object(java::Thin::value::<MainDay>(11, MainDay::Mon))), Some(Object(java::Thin::value::<MainDay>(11, MainDay::Tue)))];",
             "java::non_null(last(&days).as_ref().map(|o| java::cast(o, Object::as_day, &(\"Main$Day\", java::APP)))) as i32",
             "some[0].as_ref().map(|o| java::cast(o, Object::as_day, &(\"Main$Day\", java::APP))).is_none()",
         ],
@@ -7467,7 +7561,7 @@ fn main_arguments_that_are_an_object_array_are_strings_as_objects() {
         &rust,
         &[
             "String(&'a java::JString) = 2,",
-            "main_args().into_iter().map(|s| Object::String(s)).collect::<Vec<_>>()",
+            "main_args().into_iter().map(|s| Object(java::Thin::value::<java::JString>(2, s))).collect::<Vec<_>>()",
         ],
     );
 }
@@ -7509,7 +7603,7 @@ fn a_string_builder_as_an_object_is_a_shared_variant_compared_by_identity() {
         &rust,
         &[
             "StringBuilder(java::StringBuilder) = 11,",
-            "let held = Object::StringBuilder(sb.clone());",
+            "let held = Object(java::Thin::pointer::<java::StringBuilder>(11, sb.clone()));",
             "11 => { let o: &java::StringBuilder = &unsafe { this.0.to_pointer() }; matches!(other.view(), ObjectView::StringBuilder(ref b) if o.same(b)) }",
             "11 => { let o: &java::StringBuilder = &unsafe { self.0.to_pointer() }; fmt::Display::fmt(o, f) }",
         ],
@@ -7576,8 +7670,8 @@ fn an_arraycopy_between_objects_reads_and_stores_each_array_class_once() {
         &[
             "impl java::CopyAcross for Object {",
             "fn copy_out(&self, range: std::ops::Range<usize>) -> Vec<Option<Self>> {",
-            "java::Elements::reading(o, range, |items| items.iter().map(|e| { let x = e.clone(); Some(Object::Color(x)) }).collect())",
-            "java::Elements::reading(o, range, |items| items.iter().map(|e| { let x = e.clone(); Some(Object::StringArray(x)) }).collect())",
+            "java::Elements::reading(o, range, |items| items.iter().map(|e| { let x = e.clone(); Some(Object(java::Thin::value::<Color>(18, x))) }).collect())",
+            "java::Elements::reading(o, range, |items| items.iter().map(|e| { let x = e.clone(); Some(Object(java::Thin::pointer::<java::Array<Option<java::JString>>>(17, x))) }).collect())",
             "fn copy_in(&self, at: usize, items: &[Option<Self>]) {",
             "java::Elements::store_from(o, at, &items.iter().map(|e| e.as_ref().map(|o| o.as_string().unwrap_or_else(",
         ],
@@ -7606,7 +7700,7 @@ fn an_array_of_references_used_as_an_object_array_is_one_everywhere() {
         &rust,
         &[
             "fn count(xs: &[Object]) -> i32 {",
-            "let vs: Vec<Object> = vec![Object::V(Arc::new(V__new(1)))];",
+            "let vs: Vec<Object> = vec![Object(java::Thin::pointer::<Arc<V>>(1, Arc::new(V__new(1))))];",
             "count(&vs)",
             "java::cast(&vs[0], |o| o.as_v(), &(\"V\", java::APP)).n",
         ],
@@ -7622,7 +7716,7 @@ fn a_generic_interface_bridge_converts_the_argument_and_the_result() {
         &rust,
         &[
             "fn next_integer(&self) -> i32 {",
-            "fn next(&self) -> Object {\n        Object::Integer(self.next_integer())\n    }",
+            "fn next(&self) -> Object {\n        Object(java::Thin::value::<i32>(8, self.next_integer()))\n    }",
             "fn compare_to_point(&self, o: &Arc<Point>) -> i32 {",
             "fn compare_to(&self, other: Comparable) -> i32 {\n        self.compare_to_point(&java::cast(&other, |o| o.as_point(), &(\"Point\", java::APP)))\n    }",
         ],
@@ -7650,7 +7744,7 @@ fn a_string_array_passed_as_an_array_of_a_type_variable_is_an_object_array() {
         &rust,
         &[
             "fn first(xs: &[Object]) -> Object {",
-            "let s: Vec<Object> = vec![Object::String(java::JString::from(\"a\"))];",
+            "let s: Vec<Object> = vec![Object(java::Thin::value::<java::JString>(2, java::JString::from(\"a\")))];",
             "java::cast(&first(&s), |o| o.as_string(), &(\"java.lang.String\", java::BASE))",
         ],
     );
@@ -7835,7 +7929,7 @@ fn clone_in_a_class_tree_copies_each_runtime_class() {
         &rust,
         &[
             "AShapeView::Shape(_) => match java::try_clone_refused(\"A$Shape\") { Ok(v) => v, Err(e) => return Err(Throwable::j2r_raised(e)) },",
-            "AShapeView::Circle(ref o) => { AShape::Circle(Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) })) }",
+            "AShapeView::Circle(ref o) => { AShape(java::Thin::pointer::<Arc<ACircle>>(3, Arc::new(ACircle { base: AShapeFields { x: java::Field::new(o.base.x.get()) }, r: java::Field::new(o.r.get()) }))) }",
         ],
     );
 }
@@ -8411,7 +8505,7 @@ fn a_small_default_body_is_copied_for_each_class_whose_arm_calls_it() {
     assert_contains(
         &rust,
         &[
-            "HeightsReader__min_y_in_reader__on_heights_level(HeightsReader::Level(o.clone()))",
+            "HeightsReader__min_y_in_reader__on_heights_level(HeightsReader(java::Thin::pointer::<Arc<HeightsLevel>>(3, o.clone())))",
             "fn HeightsReader__min_y_in_reader__on_heights_level(this: HeightsReader) -> i32 {\n    ({ let o: &Arc<HeightsLevel> = &unsafe { this.0.to_pointer() }; o.dimension() }).min_y()",
             "fn HeightsReader__min_y_in_reader__on_heights_other(",
         ],
@@ -8484,7 +8578,7 @@ fn a_default_body_on_receivers_of_known_classes_runs_their_copies() {
         &rust,
         &[
             "fn KnownHeights__max_y__on_known_level(this: KnownHeights) -> i32 {\n    ({ let o: &Arc<KnownLevel> = &unsafe { this.0.to_pointer() }; o.min_y() })",
-            "java::println!(\"{}\", KnownHeights__max_y__on_known_level(KnownHeights::Level(level.clone())));",
+            "java::println!(\"{}\", KnownHeights__max_y__on_known_level(KnownHeights(java::Thin::pointer::<Arc<KnownLevel>>(2, level.clone()))));",
         ],
     );
     assert_lacks(&rust, &["__on_known_chunk", "__on_known_fixed", "__on_known_imposter"]);

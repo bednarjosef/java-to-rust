@@ -495,8 +495,8 @@ method's body, then the bridge's conversion of its value:
 
 ```rust
 Rc::new(|t: Object| -> Object {
-    let x: i32 = java::cast(t.as_integer(), "java.lang.Integer");
-    Object::Integer(x.wrapping_mul(x))
+    let x: i32 = java::cast(&t, |o| o.as_integer(), &("java.lang.Integer", java::BASE));
+    Object(java::Thin::value::<i32>(5, x.wrapping_mul(x)))
 }) as Function
 ```
 

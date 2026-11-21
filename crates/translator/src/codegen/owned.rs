@@ -21,7 +21,8 @@ impl<'a> Gen<'a> {
             Some((Stmt::Expr(Expr { kind: ExprKind::ThisCall { args, resolved }, .. }), rest)) => {
                 let index = resolved.expect("calls are resolved by the checker");
                 let args = self.call_args(index, args).join(", ");
-                let call = Code::atom(format!("{}({args})", self.qualified_fn(index)));
+                let path = self.qualified_fn(index) + self.entry_suffix(index);
+                let call = Code::atom(format!("{path}({args})"));
                 if self.facts.throwing.contains(&index) {
                     delegated = Some(call.text.clone());
                 }

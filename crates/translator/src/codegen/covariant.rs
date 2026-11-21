@@ -45,7 +45,7 @@ impl<'a> Gen<'a> {
     /// `x`, a value of representation `src`, as a value of representation `dst`.
     fn convert_rep(&mut self, src: Rep, dst: Rep, x: &str) -> String {
         match (src, dst) {
-            (Rep::Object(c), Rep::Enum(t)) => format!("{}({x})", self.variant(t, c)),
+            (Rep::Object(c), Rep::Enum(t)) => self.variant(t, c, x),
             (Rep::Enum(s), Rep::Enum(t)) if s != t => {
                 self.need(Need::Convert(s, t));
                 format!("{x}.{}()", self.to_name(t))

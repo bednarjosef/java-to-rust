@@ -334,7 +334,7 @@ fn a_thread_object_is_never_borrowed_across_a_join() {
     // `join` waits for the other thread, which may need the object's lock: it is no method of the
     // fields struct, which would hold the lock for the call.
     let rust = translate(WORKER);
-    assert_contains(&rust, &["Thread__join(Thread::Worker(w.clone()));"]);
+    assert_contains(&rust, &["Thread__join(Thread(java::Thin::pointer::<Arc<AWorker>>(11, w.clone())));"]);
     assert_lacks(&rust, &[".borrow().base.join()"]);
 }
 

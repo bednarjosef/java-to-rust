@@ -451,13 +451,28 @@ fn dispatcher(attrs: &[syn::Attribute]) -> bool {
 /// where Java code calls a method that throws) count as one token, as the `?` they stand for did.
 /// So does a path (`crate::net::minecraft::world::level::biome::ClimateParameter`), one name
 /// however deep its package: a cast of an `Object` to a class (`Object::as_x`, a compare of the
-/// class number) is as small in a program of many packages as in one of none.
+/// class number) is as small in a program of many packages as in one of none. A value of an
+/// enum's variant (`Base(java::Thin::pointer::<Arc<RefCell<Circle>>>(2, o))`,
+/// `codegen::dispatch`'s `variant`) counts as the call of a constructor of the variant that it
+/// stands for (`Base::Circle(o)`), and a `match` that makes one of an `Option` (`match x { Some(o)
+/// => Some(..), None => None }`) as `x.map(Base::Circle)`, in tokens and, as near as the text
+/// tells, in bytes: as they were counted when the generator wrote a constructor function per
+/// variant, so that writing them out moves no function out of the header.
 fn small(code: &str) -> bool {
     fn passes_on(stream: &proc_macro2::TokenStream) -> bool {
         let first: String = stream.clone().into_iter().take(6).map(|t| t.to_string()).collect();
         first == "Ok(v)=>v," || first == "Some(v)=>v,"
     }
     fn count(stream: proc_macro2::TokenStream, limit: usize) -> usize {
+        // The group of a variant's value (`Base(..)`) holds the object alone, as the group of
+        // the constructor's call did; the group of the `match` of an `Option` its scrutinee and
+        // `.map(..)` of the variant.
+        if let Some(object) = variant_held(&stream) {
+            return count(object, limit);
+        }
+        if let Some((option, value)) = option_mapped(&stream) {
+            return count(option, limit) + 2 + count(value, limit).saturating_sub(2);
+        }
         let mut n = 0;
         let mut tokens = stream.into_iter().peekable();
         while let Some(token) = tokens.next() {
@@ -486,8 +501,125 @@ fn small(code: &str) -> bool {
         n
     }
     // A token is at least a byte, and most are several: a longer text is not small.
-    code.len() <= SMALL_TOKENS * 12
+    code.len().saturating_sub(variant_bytes(code)) <= SMALL_TOKENS * 12
         && code.parse::<proc_macro2::TokenStream>().is_ok_and(|s| count(s, SMALL_TOKENS) <= SMALL_TOKENS)
+}
+
+/// The start of a variant's value inside its enum's group (`codegen::dispatch`'s `variant`).
+const VARIANT_VALUES: [&str; 2] = ["java::Thin::pointer::<", "java::Thin::value::<"];
+
+/// The object that `stream`, the group of a value of an enum's variant
+/// (`java::Thin::pointer::<P>(2, o)` inside `Base(..)`), holds: `o`.
+fn variant_held(stream: &proc_macro2::TokenStream) -> Option<proc_macro2::TokenStream> {
+    use proc_macro2::TokenTree;
+    let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
+    let words: Vec<String> = tokens.iter().take(9).map(|t| t.to_string()).collect();
+    if words.len() < 9
+        || words[..3] != ["java", ":", ":"]
+        || words[3..6] != ["Thin", ":", ":"]
+        || !matches!(words[6].as_str(), "pointer" | "value")
+        || words[7..9] != [":", ":"]
+    {
+        return None;
+    }
+    // The payload's type, `<..>`, then the group of the class number and the object.
+    let mut depth = 0usize;
+    let mut at = 9;
+    while at < tokens.len() {
+        if let TokenTree::Punct(p) = &tokens[at] {
+            let arrow = at > 0 && matches!(&tokens[at - 1], TokenTree::Punct(q) if q.as_char() == '-');
+            match p.as_char() {
+                '<' => depth += 1,
+                '>' if !arrow => depth = depth.checked_sub(1)?,
+                _ => {}
+            }
+        }
+        at += 1;
+        if depth == 0 {
+            break;
+        }
+    }
+    let [TokenTree::Group(args)] = &tokens[at..] else { return None };
+    let mut args = args.stream().into_iter();
+    let (Some(TokenTree::Literal(_)), Some(TokenTree::Punct(comma))) = (args.next(), args.next()) else {
+        return None;
+    };
+    (comma.as_char() == ',').then(|| args.collect())
+}
+
+/// The `Option` and the variant's value of `stream` when it is the group of a `match` that makes
+/// a value of an enum's variant of an `Option`'s object (`dispatch`'s `class_cast`): `match x {
+/// Some(o) => Some(Base(..)), None => None }`.
+fn option_mapped(
+    stream: &proc_macro2::TokenStream,
+) -> Option<(proc_macro2::TokenStream, proc_macro2::TokenStream)> {
+    use proc_macro2::{Delimiter, TokenTree};
+    let mut tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
+    let Some(TokenTree::Group(arms)) = tokens.pop() else { return None };
+    if arms.delimiter() != Delimiter::Brace
+        || !matches!(tokens.first(), Some(TokenTree::Ident(i)) if i == "match")
+    {
+        return None;
+    }
+    let arms: Vec<TokenTree> = arms.stream().into_iter().collect();
+    let words: Vec<String> = arms.iter().map(|t| t.to_string()).collect();
+    let [some, o, eq, gt, some_again, TokenTree::Group(value), ..] = &arms[..] else { return None };
+    let shape = [some, o, eq, gt, some_again].map(|t| t.to_string().replace(' ', ""));
+    if shape != ["Some", "(o)", "=", ">", "Some"] || words[6..] != [",", "None", "=", ">", "None"] {
+        return None;
+    }
+    let held = value.stream();
+    let mut parts = held.clone().into_iter();
+    let (Some(TokenTree::Ident(_)), Some(TokenTree::Group(inner)), None) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    variant_held(&inner.stream())?;
+    Some((tokens.into_iter().skip(1).collect(), held))
+}
+
+/// How many bytes more the values of enums' variants in `code` take than the constructors' calls
+/// they stand for did, as near as the text tells (`small`): a value's class number and the
+/// payload's type, but for its last name, which stands for the variant's (`Circle` in
+/// `Base(java::Thin::pointer::<Arc<RefCell<Circle>>>(2, o))` for `Base::Circle(o)`); and for the
+/// `match` of an `Option`, what it takes more than `.map(..)`.
+fn variant_bytes(code: &str) -> usize {
+    let mut extra = 0;
+    for start in VARIANT_VALUES {
+        let mut from = 0;
+        while let Some(found) = code[from..].find(start) {
+            let at = from + found;
+            from = at + start.len();
+            // The payload's type, to its `>`.
+            let mut depth = 1usize;
+            let mut end = from;
+            for (i, b) in code[from..].bytes().enumerate() {
+                match b {
+                    b'<' => depth += 1,
+                    b'>' if i == 0 || code.as_bytes()[from + i - 1] != b'-' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = from + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let payload = &code[from..end.saturating_sub(1).max(from)];
+            let name = payload.rsplit(|c: char| !(c.is_alphanumeric() || c == '_')).find(|w| !w.is_empty());
+            let name = name.unwrap_or_default();
+            let number = code[end..].find(", ").map_or(0, |n| n + 2);
+            // With the payload's `>` and the inner call's `)`, for the constructor's `::` and name.
+            let written = start.len() + payload.len() + 1 + number + 1;
+            extra += written.saturating_sub(2 + name.trim_end_matches("Fields").len());
+            from = end;
+        }
+    }
+    // `(match `, ` { Some(o) => Some(`, `), None => None })` for `.map(` and `)`, and the `(o)`
+    // of the variant's value that the constructor, a function value there, did not have.
+    extra + code.matches(" { Some(o) => Some(").count() * (7 + 19 + 17 - 6 + 3)
 }
 
 /// Whether a function with attributes `attrs` may be marked `#[inline]`: it has no inline
@@ -499,7 +631,7 @@ fn inlinable(attrs: &[syn::Attribute]) -> bool {
 /// Whether a function with attributes `attrs` and block `code` stays in the header for its size
 /// (`small`): it is neither `#[cold]` nor `#[inline(never)]`. One that the generator marked
 /// `#[inline]` itself stays as one that the split marks does: a class's initialization check
-/// (`init_x`, whose `init_x_slow` moves), a variant's constructor, the view of an enum.
+/// (`init_x`, whose `init_x_slow` moves), the view of an enum.
 fn stays(attrs: &[syn::Attribute], code: &str) -> bool {
     let never = |a: &syn::Attribute| {
         a.path().is_ident("cold")
@@ -1413,6 +1545,40 @@ mod tests {
         );
         assert!(moved.contains("fn j2r__p__sum") && moved.contains("fn body_total"), "{moved}");
         assert!(moved.contains("fn j2r__p__slow"), "{moved}");
+    }
+
+    /// A value of an enum's variant counts as the call of the constructor function that it stands
+    /// for, in tokens and in bytes, and so does the `match` that makes one of an `Option`'s object
+    /// as that `Option`'s `map` of the constructor.
+    #[test]
+    fn a_variant_value_counts_as_the_constructor_call_it_stands_for() {
+        let payload = "Arc<java::Monitored<crate::a::b::Circle>>";
+        let deep = "crate::".to_string() + &"package::".repeat(10) + "Circle__new()";
+        let value = |x: &str| format!("Base(java::Thin::pointer::<{payload}>(2, {x}))");
+        let call = |x: &str| format!("Base::Circle({x})");
+        let pairs = [
+            (value("o.clone()"), call("o.clone()")),
+            (value(&deep), call(&deep)),
+            (
+                format!("(match self.c.clone() {{ Some(o) => Some({}), None => None }})", value("o")),
+                "self.c.clone().map(Base::Circle)".to_string(),
+            ),
+        ];
+        for (written, before) in &pairs {
+            let mut small = Vec::new();
+            for n in 1..16 {
+                let body = |x: &str| format!("{{ let v = [{}]; v }}", vec![x; n].join(", "));
+                assert_eq!(
+                    super::small(&body(written)),
+                    super::small(&body(before)),
+                    "{n}: {}",
+                    body(written)
+                );
+                small.push(super::small(&body(before)));
+            }
+            // The limit falls among them.
+            assert!(small.contains(&true) && small.contains(&false), "{before}");
+        }
     }
 
     /// A moved function or method that returns a `Result` of a small value returns it widened,

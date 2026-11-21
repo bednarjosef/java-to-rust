@@ -218,7 +218,8 @@ impl<'a> Gen<'a> {
                 return None;
             }
             let args = self.call_args(t, args);
-            return Some(Code::atom(format!("{}_on_stack({})", self.static_fn(t), with(args))));
+            let suffix = self.entry_suffix(t);
+            return Some(Code::atom(format!("{}{suffix}_on_stack({})", self.static_fn(t), with(args))));
         };
         if self.closure_type(receiver.ty).is_some() || self.inlined(receiver, index) {
             return None;

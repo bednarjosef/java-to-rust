@@ -332,9 +332,6 @@ pub(super) enum Need {
     /// `java::CopyAcross`: what `System.arraycopy` between arrays of two classes asks of the
     /// object (see `arraycopy`).
     CopyAcross(usize),
-    /// The constructor of the variant of class `c` on the enum of `t`, as `(t, c)`: written only
-    /// where code makes a value of it (`Gen::variant`).
-    Variant(usize, usize),
 }
 
 /// The items of `wanted` written in the `impl` of the enum of each type (`type_enum_items`), in
@@ -348,8 +345,7 @@ pub(super) fn impl_needs(wanted: &Needs, homes: &[Home]) -> HashMap<usize, Vec<N
             | Need::Convert(s, _)
             | Need::Narrow(s, _)
             | Need::Dispatch(s, _)
-            | Need::Among(s, ..)
-            | Need::Variant(s, _) => s,
+            | Need::Among(s, ..) => s,
             Need::Body(i) | Need::BodyFor(i, _) => match homes[i] {
                 Home::Enum(t) => t,
                 _ => continue,
@@ -388,8 +384,7 @@ pub(super) fn need_types(class: &Class, homes: &[Home], need: Need) -> Vec<usize
         | Need::IdentityHash(t)
         | Need::CastSource(t)
         | Need::CopyKind(t)
-        | Need::CopyAcross(t)
-        | Need::Variant(t, _) => vec![t],
+        | Need::CopyAcross(t) => vec![t],
     }
 }
 
@@ -431,8 +426,7 @@ impl<'a> Gen<'a> {
             | Need::RuntimeTypeNames(t)
             | Need::IdentityHash(t)
             | Need::CastSource(t)
-            | Need::CopyKind(t)
-            | Need::Variant(t, _) => {
+            | Need::CopyKind(t) => {
                 needs.insert(Need::Enum(t));
             }
             Need::NullableText(t) | Need::JavaString(t) => {
@@ -523,19 +517,28 @@ impl<'a> Gen<'a> {
         found
     }
 
-    /// The path of the variant of class `c` in the enum of `t`: `Shape::Circle`. A variant is
-    /// named after its class, with the class's outer classes when two variants share a name, and
-    /// with its package too when two classes of different packages share that
-    /// (`JavaUtilStreamAbstractSetInEntrySet`).
+    /// A value of the enum of `t` that holds `x`, an object of class `c` as the class's variant
+    /// holds it (`payload`): the class's number with the object's handle or value,
+    /// `Shape(java::Thin::pointer::<Arc<RefCell<Circle>>>(2, x))`. The payload's type is written
+    /// out, so that rustc still checks that `x` is an object of the class the number says.
     ///
-    /// Code that names it makes a value of it, so its constructor is written
-    /// (`Need::Variant`); `variant_path` names it without.
-    pub(super) fn variant(&self, t: usize, c: usize) -> String {
-        self.need(Need::Variant(t, c));
-        self.variant_path(t, c)
+    /// A constructor function per variant (`Shape::Circle(x)`) would say it in fewer words, but a
+    /// large program makes values of tens of thousands of variants (Minecraft's server of 54,600),
+    /// and each such function is one more item for rustc to check in the crate that has the enum,
+    /// and to keep in its metadata for every crate that calls it.
+    pub(super) fn variant(&mut self, t: usize, c: usize, x: &str) -> String {
+        self.need(Need::Enum(t));
+        let name = struct_name(&self.class.types[t].name);
+        let payload = self.payload(c);
+        let make = if self.thin_pointer(c) { "pointer" } else { "value" };
+        let thin = self.runtime("Thin");
+        format!("{name}({thin}::{make}::<{payload}>({}, {x}))", self.class_tag(c))
     }
 
-    /// `variant`'s path, for a pattern or the enum's own items, which need no constructor.
+    /// The path of the variant of class `c` in the enum of `t`, `Shape::Circle`, which names its
+    /// variant in the enum's view (`view_pattern`). A variant is named after its class, with the
+    /// class's outer classes when two variants share a name, and with its package too when two
+    /// classes of different packages share that (`JavaUtilStreamAbstractSetInEntrySet`).
     fn variant_path(&self, t: usize, c: usize) -> String {
         self.need(Need::Enum(t));
         let names = self.variant_names_of(t);
@@ -717,26 +720,8 @@ impl<'a> Gen<'a> {
         runs
     }
 
-    /// The constructor of the variant of class `c` on the enum named `name`
-    /// (`Shape::Circle(handle)`), an associated function named as the variant is. Only those that
-    /// code calls are written: a class is a variant of the enum of every type above it, and most
-    /// of those are never made (javac's translation calls 6,900 of 11,700), while each is a
-    /// function for rustc to check and to keep in the header's metadata.
-    fn variant_constructor(&mut self, t: usize, c: usize, name: &str) {
-        let vis = self.vis();
-        let short = self.variant_path(t, c).rsplit("::").next().unwrap_or_default().to_string();
-        let payload = self.payload(c);
-        let (tag, make) = (self.class_tag(c), if self.thin_pointer(c) { "pointer" } else { "value" });
-        self.line("#[allow(non_snake_case)]");
-        self.line("#[inline]");
-        self.line(&format!("{vis}fn {short}(o: {payload}) -> {name} {{"));
-        self.line(&format!("    {name}(java::Thin::{make}({tag}, o))"));
-        self.line("}");
-    }
-
-    /// `view()`, which lends what the value holds as the view's variant (`java::Thin`). The
-    /// constructors of the variants are written with the enum's other items, each where code
-    /// makes a value of it (`variant_constructor`).
+    /// `view()`, which lends what the value holds as the view's variant (`java::Thin`). Code makes
+    /// a value of a variant with the class's number (`variant`).
     fn thin_impl(&mut self, name: &str, view: &str, variants: &[usize], shorts: &[String]) {
         let vis = self.vis();
         self.gap();
@@ -756,7 +741,7 @@ impl<'a> Gen<'a> {
             for (&c, short) in variants.iter().zip(shorts) {
                 let (tag, method) =
                     (self.class_tag(c), if self.thin_pointer(c) { "to_pointer" } else { "as_value" });
-                // The class number is the one its constructor gives.
+                // The class number is the one `variant` gives.
                 self.line(&format!("{tag} => {view}::{short}(unsafe {{ self.0.{method}() }}),"));
             }
             self.line("tag => java::bad_tag(tag),");
@@ -885,8 +870,8 @@ impl<'a> Gen<'a> {
 
     /// `variant`, when the enum of `t` has a variant for class `c`: it has none when no object of
     /// `c` is ever created, where code that has one never runs.
-    pub(super) fn variant_of(&self, t: usize, c: usize) -> Option<String> {
-        self.is_enum_variant(t, c).then(|| self.variant(t, c))
+    pub(super) fn variant_of(&mut self, t: usize, c: usize, x: &str) -> Option<String> {
+        self.is_enum_variant(t, c).then(|| self.variant(t, c, x))
     }
 
     /// The name of the conversion to the enum of `t`: `to_shape`.
@@ -1382,7 +1367,7 @@ impl<'a> Gen<'a> {
     pub(super) fn string_as_object(&mut self, s: &str) -> String {
         let object = self.object_index().expect("an `Object[]` in a program that uses `Object`");
         let string = self.type_of(Type::String).expect("strings among `Object`'s runtime classes");
-        format!("{}({s})", self.variant(object, string))
+        self.variant(object, string, s)
     }
 
     /// `StringArrayOf` and `ObjectArrayOf`: a copy of array `e` (an `Object[]` or a `String[]`) as
@@ -1460,14 +1445,14 @@ impl<'a> Gen<'a> {
         Code::atom(self.passed_on(code))
     }
 
-    /// The arrays that become `Object`s: the variant of `Object` of each and its pattern, with
-    /// its type.
-    fn object_arrays(&self) -> Vec<(String, String, Type)> {
+    /// The arrays that become `Object`s: the class of each and its pattern in `Object`'s view,
+    /// with its type.
+    fn object_arrays(&self) -> Vec<(usize, String, Type)> {
         let Some(t) = self.object_index() else { return Vec::new() };
         let mut out = Vec::new();
         for c in self.enum_variants(t) {
             if let Some(array) = self.class.array_of(c) {
-                out.push((self.variant(t, c), self.view_pattern(t, c), array));
+                out.push((c, self.view_pattern(t, c), array));
             }
         }
         out
@@ -1508,21 +1493,24 @@ impl<'a> Gen<'a> {
         let mut names = Vec::new();
         let object_array = Type::array(Type::class(OBJECT));
         let mut objects = None;
-        for (variant, _, array) in self.object_arrays() {
+        let objects_enum = self.object_index();
+        for (c, _, array) in self.object_arrays() {
+            let t = objects_enum.expect("`Object` among the arrays that become `Object`s");
             let element = array.element();
             let name = rust_string(&self.type_class_name(element));
             let zero = self.element_zero(element);
             let filled =
                 self.runtime(if self.shared_array_type(array) { "try_shared_filled" } else { "try_filled" });
-            arms.push(format!("{name} => {filled}({n}, {zero}).map({variant}),"));
+            let variant = self.variant(t, c, "a");
+            arms.push(format!("{name} => {filled}({n}, {zero}).map(|a| {variant}),"));
             if array == object_array {
-                objects = Some((variant, filled, zero));
+                objects = Some((t, c, filled, zero));
             }
             names.push(name);
         }
         // An array of a narrower class that the translation holds as an `Object[]` carrying its
         // class (`lower::covariant`), of the classes the code makes or tests arrays of.
-        if let Some((variant, filled, zero)) = objects {
+        if let Some((t, c, filled, zero)) = objects {
             let mut covariant: Vec<Type> = Vec::new();
             // In the order of the expressions, so that the translation is the same every time.
             let in_order = |map: &'a std::collections::HashMap<ExprId, Type>| {
@@ -1544,7 +1532,8 @@ impl<'a> Gen<'a> {
                     continue;
                 }
                 let tagged = self.with_element_class(class, Code::atom("a".to_string())).text;
-                arms.push(format!("{name} => {filled}({n}, {zero}).map(|a| {variant}({tagged})),"));
+                let variant = self.variant(t, c, &tagged);
+                arms.push(format!("{name} => {filled}({n}, {zero}).map(|a| {variant}),"));
                 names.push(name);
             }
         }
@@ -1903,8 +1892,8 @@ impl<'a> Gen<'a> {
             }
             None => {
                 let (c, handle) = self.variant_value(e);
-                match self.variant_of(t, c) {
-                    Some(variant) => format!("{variant}({handle})"),
+                match self.variant_of(t, c, &handle) {
+                    Some(variant) => variant,
                     // The object is read first, which may throw.
                     None => {
                         let ty = struct_name(&self.class.types[t].name);
@@ -1988,13 +1977,15 @@ impl<'a> Gen<'a> {
                 }
                 None => {
                     let c = self.value_class(value);
-                    match self.variant_of(t, c) {
-                        // A borrowed optional string is an `Option<&str>`.
-                        Some(variant) if matches!(&value.kind, ExprKind::Var(name) if self.borrowed_optional.contains(name)) =>
-                        {
-                            format!("{option}.map(|s| {variant}(s.to_owned()))")
+                    // A borrowed optional string is an `Option<&str>`.
+                    let borrowed =
+                        matches!(&value.kind, ExprKind::Var(name) if self.borrowed_optional.contains(name));
+                    match self.variant_of(t, c, if borrowed { "o.to_owned()" } else { "o" }) {
+                        // A `match` rather than `map` with a closure, which would be one more
+                        // body for rustc to check at each of these, the most common conversion.
+                        Some(variant) => {
+                            format!("(match {option} {{ Some(o) => Some({variant}), None => None }})")
                         }
-                        Some(variant) => format!("{option}.map({variant})"),
                         None => {
                             format!("{option}.map(|_| -> {} {{ {} }})", self.ty_name(to), absent(self, c))
                         }
@@ -2012,19 +2003,19 @@ impl<'a> Gen<'a> {
                 // An object's last use moves its handle in.
                 // No object of the class is created, so none reaches here; the value is still
                 // computed first, which may throw.
-                let Some(variant) = self.variant_of(t, c) else {
+                if !self.is_enum_variant(t, c) {
                     let ty = self.ty_name(to);
                     let text = self.expr(value).text;
                     return Code::atom(format!(
                         "{{ let _ = {text}; None::<{ty}>.unwrap_or_else(|| {}) }}",
                         absent(self, c)
                     ));
-                };
+                }
                 let v = match self.runtime_of(c) {
                     Some(_) => self.variant_value(value).1,
                     None => self.expr(value).text,
                 };
-                Code::atom(format!("{variant}({v})"))
+                Code::atom(self.variant(t, c, &v))
             }
         }
     }
@@ -2599,8 +2590,9 @@ impl<'a> Gen<'a> {
     }
 
     /// A call of method `index`, emitted on the enum of a type or on a fields struct, from code
-    /// whose receiver is not the struct that has it: `Base::Circle(c.clone()).describe_in_base()`
-    /// or, in a method of an enum, `self.base_mut().get_name()`. `None` for any other call.
+    /// whose receiver is not the struct that has it: `c` made a value of the enum
+    /// (`Base(java::Thin::pointer::<..>(2, c.clone())).describe_in_base()`) or, in a method of an
+    /// enum, `self.base_mut().get_name()`. `None` for any other call.
     pub(super) fn inherited_call(
         &mut self,
         receiver: &'a Expr,
@@ -2793,7 +2785,6 @@ impl<'a> Gen<'a> {
                 Need::BaseMut(_) => self.base_fn(t, true),
                 Need::Convert(_, to) => self.convert_fn(to),
                 Need::Narrow(_, to) => self.narrow_fn(t, to),
-                Need::Variant(_, c) => self.variant_constructor(t, c, &name),
                 _ => {}
             }
         }
@@ -2994,7 +2985,7 @@ impl<'a> Gen<'a> {
             let tag = self.class_tag(c);
             if uses {
                 let payload = self.payload(c);
-                // The class number is the one its constructor gives.
+                // The class number is the one `variant` gives.
                 let body = match &frames {
                     Some((params, args, ret))
                         if ![me, "self", "Self", "j2r_thin"].iter().any(|w| mentions_word(&text, w)) =>
@@ -3204,7 +3195,7 @@ impl<'a> Gen<'a> {
             for &c in passing.iter() {
                 let (payload, lent) = (self.payload(c), self.lent_object(c, "self.0"));
                 let (tag, held) = (self.class_tag(c), self.held(c));
-                // The class number is the one its constructor gives.
+                // The class number is the one `variant` gives.
                 self.line(&format!("{tag} => {{ let o: &{payload} = {lent}; Some({held}) }}"));
             }
             self.line("_ => None,");
@@ -3453,7 +3444,8 @@ impl<'a> Gen<'a> {
         let Some(object) = object else {
             return reject(self, "a string or a box where no `Object` is one");
         };
-        let value = format!("{}({})", self.variant(object, c), self.held(c));
+        let held = self.held(c);
+        let value = self.variant(object, c, held);
         let text = if resolve {
             value
         } else {
@@ -3590,7 +3582,7 @@ impl<'a> Gen<'a> {
             self.rejected.push(Error { pos: method.pos, message: message.to_string() });
             return "unreachable!()".to_string();
         };
-        let value = format!("{}({text})", self.variant(char_sequence, string));
+        let value = self.variant(char_sequence, string, &text);
         if self.facts.nullable_returns.contains(&r) { format!("Some({value})") } else { value }
     }
 
@@ -3669,7 +3661,7 @@ impl<'a> Gen<'a> {
             }
             _ => return "unreachable!()".to_string(),
         };
-        let builder = format!("{}(o.clone())", self.variant(appendable, c));
+        let builder = self.variant(appendable, c, "o.clone()");
         let value =
             if self.facts.nullable_returns.contains(&r) { format!("Some({builder})") } else { builder };
         format!("{{ {append}; {value} }}")
@@ -4134,7 +4126,8 @@ impl<'a> Gen<'a> {
             return Some(if d == t {
                 (self.enum_fn_call(d, &name, self.this_value(), &with), false)
             } else if !self.class.hierarchy.is_subtype(t, d) {
-                let obj = format!("{}({})", self.variant(d, c), self.held(c));
+                let held = self.held(c);
+                let obj = self.variant(d, c, held);
                 (self.enum_fn_call(d, &name, &obj, &with), true)
             } else {
                 self.need(Need::Convert(t, d));
@@ -4187,7 +4180,8 @@ impl<'a> Gen<'a> {
                     (self.enum_fn_call(d, &name, self.this_value(), args), false)
                 } else if !self.class.hierarchy.is_subtype(t, d) {
                     // A body inherited from a type below `t`: the object as a value of that type.
-                    let obj = format!("{}({})", self.variant(d, c), self.held(c));
+                    let held = self.held(c);
+                    let obj = self.variant(d, c, held);
                     (self.enum_fn_call(d, &name, &obj, args), true)
                 } else {
                     self.need(Need::Convert(t, d));

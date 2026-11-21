@@ -146,8 +146,8 @@ impl<'a> Gen<'a> {
                     }
                 }
             }
-            hierarchy::Rep::Object(k) => match self.variant_of(t, k) {
-                Some(variant) => format!("{variant}(x)"),
+            hierarchy::Rep::Object(k) => match self.variant_of(t, k, "x") {
+                Some(variant) => variant,
                 None => {
                     let missing = self.copy_missing(&format!("a {} as an `Object`", self.binary_name(k)));
                     format!("{{ let _ = x; {missing} }}")
