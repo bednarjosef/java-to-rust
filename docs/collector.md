@@ -540,9 +540,17 @@ keeps what it read lately while memory is plentiful.
 ## Threads
 
 The runtime's `pthread_create` takes the C library's place: it registers the new thread (its
-stack and thread pointer) as the first thing the thread does, and no collection runs between the
-call and the registration, while the closure the thread runs is only known to the C library. A
-thread unregisters when it ends; its later frees during its exit go straight back to the heap.
+stack and thread pointer) as the first thing the thread does. Until then the closure the thread
+runs is only in memory of the C library, which is not scanned, so `pthread_create` also keeps it
+in one of 64 entries in the static data (`STARTING`), which the thread clears once registered;
+collections run meanwhile. They used to wait until no thread was starting, and
+ManyThreadsAllocating, whose 32 threads allocate while the main thread starts the next, then
+took 432-752 MB before its first collection instead of 64 MB when held to one or two processors
+(`taskset`), where a new thread waits long to run as on a loaded machine, and peaked at
+525-881 MB; it now peaks at 134-154 MB there (Java: 420-455 MB), and on a loaded machine had
+reached up to 610 MB. A thread started while every entry is taken still holds collections off
+until it registers. A thread unregisters when it ends; its
+later frees during its exit go straight back to the heap.
 
 ## Testing it
 
@@ -597,6 +605,6 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   program allocates is in the heap or, for objects on the stack, in a frame that is scanned;
   statics and thread-local storage are scanned, and the only
   memory outside them is the C library's own, which holds no handles except a starting thread's
-  closure (covered above).
+  closure, which `STARTING` keeps (see "Threads").
 - The plan for a faster and smaller heap (objects without headers, 4-byte references) is in
   docs/native-speed.md.

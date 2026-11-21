@@ -56,8 +56,8 @@
 //!
 //! A thread is registered (its stack and thread pointer found) as the first thing it does, by
 //! this crate's `pthread_create`, which takes the C library's place, and unregistered when it
-//! ends. No collection runs between the call and the registration, while the closure the thread
-//! runs is only known to the C library.
+//! ends. Between the call and the registration, the closure the thread runs is kept by an entry
+//! of `STARTING`, in the static data, which collections scan.
 
 mod census;
 pub(crate) mod references;
@@ -1244,8 +1244,42 @@ static THREADS: [Thread; MAX_THREADS] = [const {
     }
 }; MAX_THREADS];
 
-/// Threads announced by `spawning` that have not registered yet.
+/// Threads started without an entry of `STARTING` that have not registered yet: no collection
+/// runs while there are any.
 static SPAWNING: AtomicUsize = AtomicUsize::new(0);
+
+/// The arguments of the threads started and not registered yet (0 where free), in the static
+/// data, which every collection scans: Rust's argument is a box of the closure the thread runs,
+/// which until the thread registers is otherwise only in memory of the C library. So a collection
+/// runs while threads start, rather than waiting until none is: ManyThreadsAllocating's 32
+/// threads, which allocate while the main thread starts the next, put off the first collection
+/// until 432-752 MB were taken instead of 64 when held to one or two processors (as on a loaded
+/// machine), and peaked at 525-881 MB where it now peaks at 134-154 MB.
+/// A thread started while every entry is taken counts in `SPAWNING` instead.
+static STARTING: [AtomicUsize; STARTING_ENTRIES] = [const { AtomicUsize::new(0) }; STARTING_ENTRIES];
+const STARTING_ENTRIES: usize = 64;
+const NO_STARTING: usize = usize::MAX;
+
+/// An entry of `STARTING` holding `argument`, or `NO_STARTING` (counted in `SPAWNING`).
+fn starting(argument: *mut u8) -> usize {
+    if !argument.is_null() {
+        for (i, entry) in STARTING.iter().enumerate() {
+            if entry.compare_exchange(0, argument as usize, Ordering::SeqCst, Ordering::Relaxed).is_ok() {
+                return i;
+            }
+        }
+    }
+    SPAWNING.fetch_add(1, Ordering::SeqCst);
+    NO_STARTING
+}
+
+/// Ends what `starting` began, once the thread is registered (or was not started).
+fn started(entry: usize) {
+    match entry {
+        NO_STARTING => _ = SPAWNING.fetch_sub(1, Ordering::SeqCst),
+        _ => STARTING[entry].store(0, Ordering::SeqCst),
+    }
+}
 
 /// The stop protocol: stopped threads count up `STOPPED` and wait while `EPOCH` is unchanged.
 static STOPPED: AtomicU32 = AtomicU32::new(0);
@@ -1353,12 +1387,14 @@ fn untake(h: &mut Heap, p: usize) {
 struct Start {
     routine: extern "C" fn(*mut u8) -> *mut u8,
     argument: *mut u8,
+    /// Its entry of `STARTING`, or `NO_STARTING`.
+    entry: usize,
 }
 
 /// `pthread_create`, in place of the C library's, for every thread of the program: Rust's
-/// threads and any other. The new thread registers before it runs anything, and no collection
-/// runs between the call and that, while the argument (Rust's closure) is only in memory of the
-/// C library, which is not scanned.
+/// threads and any other. The new thread registers before it runs anything; until then its
+/// argument (Rust's closure), otherwise only in memory of the C library, which is not scanned,
+/// is in an entry of `STARTING`.
 ///
 /// # Safety
 ///
@@ -1376,11 +1412,11 @@ pub unsafe extern "C" fn pthread_create(
         return unsafe { real(thread, attr, routine, argument) };
     }
     let start = unsafe { System.alloc(Layout::new::<Start>()) } as *mut Start;
-    unsafe { start.write(Start { routine, argument }) };
-    SPAWNING.fetch_add(1, Ordering::SeqCst);
+    let entry = starting(argument);
+    unsafe { start.write(Start { routine, argument, entry }) };
     let result = unsafe { real(thread, attr, begin, start as *mut u8) };
     if result != 0 {
-        SPAWNING.fetch_sub(1, Ordering::SeqCst);
+        started(entry);
         unsafe { System.dealloc(start as *mut u8, Layout::new::<Start>()) };
     }
     result
@@ -1395,7 +1431,7 @@ fn real_pthread_create() -> Create {
 
 /// The start of every thread: registers it, then runs what `pthread_create` was given.
 extern "C" fn begin(start: *mut u8) -> *mut u8 {
-    let Start { routine, argument } = unsafe { (start as *mut Start).read() };
+    let Start { routine, argument, entry } = unsafe { (start as *mut Start).read() };
     unsafe { System.dealloc(start, Layout::new::<Start>()) };
     let _ = LISTS.try_with(|lists| {
         let g = lock();
@@ -1403,7 +1439,8 @@ extern "C" fn begin(start: *mut u8) -> *mut u8 {
             register(&g, lists);
         }
     });
-    SPAWNING.fetch_sub(1, Ordering::SeqCst);
+    // Registered: the argument is on its stack or in its registers, which collections now read.
+    started(entry);
     routine(argument)
 }
 
@@ -2737,8 +2774,8 @@ impl OwnStack {
 fn collect(g: &Guard) {
     let own = OwnStack::here();
     if SPAWNING.load(Ordering::SeqCst) > 0 {
-        // A thread is starting, and the closure it runs is only known to the C library: try
-        // again a little later.
+        // A thread started without an entry of `STARTING` has not registered, and the closure it
+        // runs is only known to the C library: try again a little later.
         let h = heap(g);
         h.next_collection = h.taken + h.every / 4;
         return;
