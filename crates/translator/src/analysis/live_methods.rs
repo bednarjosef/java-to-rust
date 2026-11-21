@@ -201,16 +201,20 @@ fn walk(
     values: &ObjectValues,
     fast: bool,
 ) -> Result<Option<LiveMethods>, String> {
+    // A walk finds whether the analysis followed a method on a class by a binary search.
+    assert!(values.contexts.iter().all(|c| c.is_sorted()), "a method's contexts are in ascending order");
     let walk = Walk {
         class,
         values,
         fast,
+        receivers: true,
         glue: object_values::runtime_called_for_dispatch(class).into_iter().collect(),
         glue_declared: glue_declared(class),
         supers: supers(class),
         initializers: methods_by_type(class, |m| class.is_initializer(m)),
         constructors: methods_by_type(class, |m| class.methods[m].is_ctor),
         index: class.types.iter().enumerate().map(|(t, d)| (d.name.as_str(), t)).collect(),
+        enums: RefCell::default(),
         stop: Stop::new(class, code),
         state: RefCell::new(State {
             work: Vec::new(),
@@ -256,13 +260,15 @@ fn walk(
         walk.handed(STATIC, STATIC, e);
     }
     walk.run();
-    let thread_statics = {
+    // The walk of the started threads takes what this walk knows, so this one's state is not
+    // borrowed while it runs.
+    let finished = {
         let state = walk.state.borrow();
-        if state.unknown.is_none() && !state.stopped {
-            crate::timings::phase("live walk of the started threads", || walk.thread_statics())
-        } else {
-            None
-        }
+        state.unknown.is_none() && !state.stopped
+    };
+    let thread_statics = match finished {
+        true => crate::timings::phase("live walk of the started threads", || walk.thread_statics()),
+        false => None,
     };
     let Walk { state, .. } = walk;
     let State { unknown, mut live, stopped, .. } = state.into_inner();
@@ -383,17 +389,13 @@ impl Walk<'_> {
                 );
             }
             let dead = self.prepare(m);
-            let code = |e: &Expr| {
-                visit_expr(e, &mut |x| {
-                    if dead.contains(&x.id) { self.unresolved(x) } else { self.expr(m, ctx, x) }
-                })
-            };
-            let statement = |s: &Stmt| match s {
-                Stmt::Throw(e) if dead.contains(&e.id) => {}
-                _ => self.statement(m, ctx, s),
-            };
-            for s in &class.methods[m].body {
-                visit_stmt(s, &mut |e| code(e), &mut |s| statement(s));
+            for &step in &self.steps(m).walk {
+                match step {
+                    Step::Expr(x) if dead.contains(&x.id) => self.unresolved(x),
+                    Step::Expr(x) => self.expr(m, ctx, x),
+                    Step::Stmt(Stmt::Throw(e)) if dead.contains(&e.id) => {}
+                    Step::Stmt(s) => self.statement(m, ctx, s),
+                }
             }
             self.state.borrow_mut().known.env = Rc::default();
         }
@@ -437,12 +439,16 @@ impl Walk<'_> {
     /// type that the thread's code reads or writes a static of, calls a static method or
     /// constructor of, or names an enum constant of; and it runs the field initializers of every
     /// class that the thread's code creates an object of (`State::built`).
+    ///
+    /// It needs only the types that it initializes, so it records no receivers and no values of
+    /// casts and tests (`LiveMethods::tested`), and it takes what this walk found the calls run
+    /// (`Memos::targets`), as the facts are the same, and what this walk knows, which this walk
+    /// no longer needs.
     fn thread_statics(&self) -> Option<FastSet<usize>> {
         let class = self.class;
-        let main = self.state.borrow();
         let mut roots: Vec<(usize, &Expr)> = Vec::new();
         let mut starts = false;
-        for &m in &main.live.methods {
+        for &m in &self.state.borrow().live.methods {
             for s in &class.methods[m].body {
                 visit_stmt(
                     s,
@@ -466,16 +472,31 @@ impl Walk<'_> {
         if !starts {
             return None;
         }
+        let memos = {
+            let main = std::mem::take(&mut *self.memos.borrow_mut());
+            Memos {
+                targets: main.targets,
+                lists: main.lists,
+                concretes: main.concretes,
+                catches: main.catches,
+                steps: main.steps,
+                ..Memos::default()
+            }
+        };
+        let known = std::mem::take(&mut self.state.borrow_mut().known);
+        let main = self.state.borrow();
         let thread = Walk {
             class,
             values: self.values,
             fast: self.fast,
+            receivers: false,
             glue: self.glue.clone(),
             glue_declared: self.glue_declared.clone(),
             supers: self.supers.clone(),
             initializers: self.initializers.clone(),
             constructors: self.constructors.clone(),
             index: self.index.clone(),
+            enums: RefCell::new(std::mem::take(&mut *self.enums.borrow_mut())),
             stop: Stop::default(),
             state: RefCell::new(State {
                 work: Vec::new(),
@@ -487,7 +508,7 @@ impl Walk<'_> {
                 contexts: FastMap::default(),
                 catching: FastMap::default(),
                 glued: FastSet::default(),
-                known: main.known.clone(),
+                known,
                 unknown: None,
                 live: LiveMethods {
                     methods: FastSet::default(),
@@ -508,7 +529,7 @@ impl Walk<'_> {
                 glued_any: FastSet::default(),
                 stopped: false,
             }),
-            memos: RefCell::default(),
+            memos: RefCell::new(memos),
         };
         for e in &class.raised {
             thread.code(STATIC, STATIC, e);
@@ -640,6 +661,10 @@ struct Walk<'a> {
     /// objects return the same literal again (`same_literal`).
     /// `JAVA_TO_RUST_LIVE_CHECK` checks that the walk finds the same without.
     fast: bool,
+    /// Whether the walk records the classes of the receivers of the calls (`LiveMethods::receivers`)
+    /// and what the values of casts and tests of classes may be (`LiveMethods::tested`): the walk
+    /// of the started threads keeps only the types it initializes (`thread_statics`).
+    receivers: bool,
     glue: Vec<usize>,
     /// The groups of `glue` that each type declares a method of (`glue_declared`).
     glue_declared: Vec<Vec<usize>>,
@@ -649,13 +674,18 @@ struct Walk<'a> {
     /// The constructors of each type, in index order.
     constructors: Vec<Vec<usize>>,
     index: FastMap<&'a str, usize>,
+    /// The enum, if any, that each name of a class in a `Type` names, by the name's address and
+    /// length (`Walk::enum_named`): each walk looks it up for every expression of a class type,
+    /// and a type names its class with a string kept for good (`interned_name`), so that this
+    /// hashes two words rather than the name.
+    enums: RefCell<FastMap<(usize, usize), Option<usize>>>,
     stop: Stop,
     state: RefCell<State>,
-    /// What the points-to facts, which do not change during the walk, answer: the methods that
-    /// each call runs on each object, and the concrete classes below each type. A method is walked
-    /// again whenever what it relies on changes, and a call on a receiver that may be any class
-    /// runs thousands of methods.
-    memos: RefCell<Memos>,
+    /// What the points-to facts and the code, which do not change during the walk, answer: the
+    /// methods that each call runs on each object, the concrete classes below each type, and
+    /// whether a method has a `catch` clause. A method is walked again whenever what it relies on
+    /// changes, and a call on a receiver that may be any class runs thousands of methods.
+    memos: RefCell<Memos<'a>>,
 }
 
 /// The code whose running stops a walk (`live_methods_unless`).
@@ -696,11 +726,17 @@ impl Stop {
 type Targets = Rc<[(usize, usize)]>;
 
 #[derive(Default)]
-struct Memos {
+struct Memos<'a> {
     targets: FastMap<(ExprId, usize), Targets>,
     /// Each list of targets once.
     lists: FastSet<Targets>,
     concretes: FastMap<usize, Rc<[usize]>>,
+    /// The classes of each list of `lists`, by its address (`Walk::classes`).
+    classes: FastMap<usize, ClassSet>,
+    /// Whether each method that was asked about has a `catch` clause (`Walk::dead_catches`).
+    catches: FastMap<usize, bool>,
+    /// The steps of each method that was walked (`Steps`).
+    steps: FastMap<usize, Rc<Steps<'a>>>,
     /// What each call passed when it last ran all its targets, by call and list of targets
     /// (`Walk::call`).
     passed: FastMap<(ExprId, usize), Passed>,
@@ -712,6 +748,102 @@ struct Memos {
     /// The casts and `instanceof` tests whose value is in `LiveMethods::tested`, each with the
     /// object it runs on: what the value may be does not change from one walk to the next.
     tested: FastSet<(ExprId, usize)>,
+}
+
+/// What a walk of a method goes over, found once for each method rather than by walking its
+/// whole body on each walk, as each of the walk, its values (`Walk::env`, until none changes) and
+/// its dead code (`Walk::dead`) did, each over every expression twice (for those and for the
+/// statements of its switch expressions). Each list is in the order of a walk of the body.
+struct Steps<'a> {
+    /// The expressions that may run something (`Walk::expr`), have their value recorded
+    /// (`LiveMethods::tested`) or be an unresolved call (`Walk::unresolved`), and the `throw`
+    /// statements (`Walk::statement`).
+    walk: Vec<Step<'a>>,
+    /// What may give a local a value (`Walk::env`).
+    values: Vec<Step<'a>>,
+    /// The conditions that may leave code that cannot run (`Walk::dead`).
+    conditions: Vec<Step<'a>>,
+}
+
+/// An expression or a statement of a method's body.
+#[derive(Clone, Copy)]
+enum Step<'a> {
+    Expr(&'a Expr),
+    Stmt(&'a Stmt),
+}
+
+impl<'a> Walk<'a> {
+    /// The steps of method `m` (`Steps`, remembered).
+    fn steps(&self, m: usize) -> Rc<Steps<'a>> {
+        if let Some(found) = self.memos.borrow().steps.get(&m) {
+            return found.clone();
+        }
+        let steps = RefCell::new(Steps { walk: Vec::new(), values: Vec::new(), conditions: Vec::new() });
+        let class: &'a Class = self.class;
+        for s in &class.methods[m].body {
+            visit_stmt(
+                s,
+                &mut |e| {
+                    visit_expr(e, &mut |x| {
+                        let mut steps = steps.borrow_mut();
+                        if self.runs_something(x) {
+                            steps.walk.push(Step::Expr(x));
+                        }
+                        if known::gives_value(x) {
+                            steps.values.push(Step::Expr(x));
+                        }
+                        if known::condition(x) {
+                            steps.conditions.push(Step::Expr(x));
+                        }
+                    })
+                },
+                &mut |s| {
+                    let mut steps = steps.borrow_mut();
+                    if matches!(s, Stmt::Throw(_)) {
+                        steps.walk.push(Step::Stmt(s));
+                    }
+                    if known::declares_value(s) {
+                        steps.values.push(Step::Stmt(s));
+                    }
+                    if known::conditional(s) {
+                        steps.conditions.push(Step::Stmt(s));
+                    }
+                },
+            );
+        }
+        let steps = Rc::new(steps.into_inner());
+        self.memos.borrow_mut().steps.insert(m, steps.clone());
+        steps
+    }
+
+    /// Whether `Walk::expr` may run or record something for `x`, or `Walk::unresolved` report it.
+    fn runs_something(&self, x: &Expr) -> bool {
+        let runs = match &x.kind {
+            ExprKind::Call { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::ThisCall { .. }
+            | ExprKind::SuperInit { .. }
+            | ExprKind::New { .. }
+            | ExprKind::Static { .. }
+            | ExprKind::EnumConstant { .. }
+            | ExprKind::Assign { target: Place::Static { .. }, .. }
+            | ExprKind::IncDec { target: Place::Static { .. }, .. }
+            | ExprKind::Builtin(
+                Builtin::InitializeClass { .. } | Builtin::Native(Native::Missing { .. }),
+                _,
+            ) => true,
+            ExprKind::Assign { target: Place::Field { .. }, .. }
+            | ExprKind::IncDec { target: Place::Field { .. }, .. } => known::tracked(x.ty),
+            // What its value may be is recorded (`LiveMethods::tested`).
+            ExprKind::Cast(Type::Class(..), value)
+            | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } => {
+                matches!(value.ty, Type::Class(..))
+            }
+            _ => false,
+        };
+        runs || matches!(x.ty, Type::Enum(name) | Type::Class(name, _) if self.enum_named(name).is_some())
+            || object_values::hands(x)
+    }
 }
 
 /// What a call passed the methods it runs (`Walk::call`): what was known of the argument at
@@ -799,6 +931,19 @@ impl Walk<'_> {
         list
     }
 
+    /// The classes of the objects that `targets`, a list of `targets`, run on (remembered): the
+    /// receivers of the calls that run the same list share its words (`ClassSet`). On the
+    /// Minecraft server, 629,000 receivers held 66 million words, each its own.
+    fn classes(&self, targets: &Targets) -> ClassSet {
+        let key = Rc::as_ptr(targets).cast::<()>() as usize;
+        if let Some(found) = self.memos.borrow().classes.get(&key) {
+            return found.clone();
+        }
+        let classes: ClassSet = targets.iter().map(|&(_, c)| c).collect();
+        self.memos.borrow_mut().classes.insert(key, classes.clone());
+        classes
+    }
+
     /// The concrete classes below type `t`, itself included (`Hierarchy::concretes`, remembered).
     fn concretes(&self, t: usize) -> Rc<[usize]> {
         if let Some(found) = self.memos.borrow().concretes.get(&t) {
@@ -835,7 +980,7 @@ impl Walk<'_> {
             return;
         }
         // The facts of a method are for the objects that the analysis followed it on.
-        if !self.values.contexts[m].contains(&ctx) && state.unknown.is_none() {
+        if self.values.contexts[m].binary_search(&ctx).is_err() && state.unknown.is_none() {
             let on = self.class.types.get(ctx).map_or("no object", |d| d.name.as_str());
             let name = format!("{}.{}", self.class.types[method.class].name, method.name);
             state.unknown = Some(format!("`{name}` run on {on}"));
@@ -932,6 +1077,10 @@ impl Walk<'_> {
     /// (see the module's comment), which cannot run; the method waits for each type they catch.
     fn dead_catches(&self, m: usize) -> FastSet<ExprId> {
         let mut dead = FastSet::default();
+        // Most methods have none, and the walk that finds them goes over the whole body.
+        if !self.has_catches(m) {
+            return dead;
+        }
         let mut waiting = Vec::new();
         {
             let state = self.state.borrow();
@@ -959,6 +1108,21 @@ impl Walk<'_> {
         dead
     }
 
+    /// Whether method `m` has a `catch` clause (remembered).
+    fn has_catches(&self, m: usize) -> bool {
+        if let Some(&found) = self.memos.borrow().catches.get(&m) {
+            return found;
+        }
+        let mut found = false;
+        for s in &self.class.methods[m].body {
+            visit_stmt(s, &mut |_| {}, &mut |s| {
+                found |= matches!(s, Stmt::Try { catches, .. } if !catches.is_empty())
+            });
+        }
+        self.memos.borrow_mut().catches.insert(m, found);
+        found
+    }
+
     /// The statements of method `m` that the runtime sees an object in: a `throw`.
     fn statement(&self, m: usize, ctx: usize, s: &Stmt) {
         if let Stmt::Throw(e) = s {
@@ -970,6 +1134,17 @@ impl Walk<'_> {
     /// for both in an initializer), runs.
     fn code(&self, m: usize, ctx: usize, e: &Expr) {
         visit_expr(e, &mut |x| self.expr(m, ctx, x));
+    }
+
+    /// The enum named `name`, the name of a class in a `Type` (`Walk::enums`).
+    fn enum_named(&self, name: &'static str) -> Option<usize> {
+        let key = (name.as_ptr() as usize, name.len());
+        if let Some(&t) = self.enums.borrow().get(&key) {
+            return t;
+        }
+        let t = self.index.get(name).copied().filter(|&t| self.class.types[t].kind == TypeKind::Enum);
+        self.enums.borrow_mut().insert(key, t);
+        t
     }
 
     /// What the expression `x` itself runs, not counting the expressions inside it.
@@ -1035,8 +1210,9 @@ impl Walk<'_> {
         }
         // What the value of a cast or a test of a class may be, which may let the code generator
         // test fewer classes (`Class::tested`).
-        if let ExprKind::Cast(Type::Class(..), value)
-        | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } = &x.kind
+        if self.receivers
+            && let ExprKind::Cast(Type::Class(..), value)
+            | ExprKind::InstanceOf { value, ty: Type::Class(..), .. } = &x.kind
             && matches!(value.ty, Type::Class(..))
             && (!self.fast || self.memos.borrow_mut().tested.insert((x.id, ctx)))
         {
@@ -1049,8 +1225,7 @@ impl Walk<'_> {
         }
         // An enum's objects are its constants, which its static initialization makes.
         if let Type::Enum(name) | Type::Class(name, _) = x.ty
-            && let Some(&t) = self.index.get(name)
-            && self.class.types[t].kind == TypeKind::Enum
+            && let Some(t) = self.enum_named(name)
         {
             self.initialize(t);
         }
@@ -1090,12 +1265,12 @@ impl Walk<'_> {
             }
             None => None,
         };
-        if let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
+        if self.receivers
+            && let ExprKind::MethodCall { receiver, is_super: false, resolved: Some(r), .. } = &x.kind
             && !self.class.methods[*r].is_static
         {
-            let mut state = self.state.borrow_mut();
-            let classes = state.live.receivers.entry(receiver.id).or_default();
-            targets.iter().for_each(|&(_, c)| classes.insert(c));
+            let classes = self.classes(targets);
+            self.state.borrow_mut().live.receivers.entry(receiver.id).or_default().union(&classes);
         }
         let mut found = vec![None; args.len()];
         for &(target, c) in targets.iter() {

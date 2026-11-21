@@ -702,6 +702,26 @@ unresolved calls are the same (`JAVA_TO_RUST_LIVE_CHECK`), and so is javac's cen
 census the main walk goes from about 90,000 walks (36,800 of them for an object) to 50,000 (223),
 and the phase from 2.3 to 1.6 s, 0.8 s of which is the walk of the started threads.
 
+**A walk of the methods that can run that keeps what it found.** The walk of the code that
+started threads run (`Walk::thread_statics`), which finds the types whose statics that code may
+touch, found again what every call runs from the points-to facts and recorded the classes of
+every call's receivers and what the values of casts and `instanceof` tests may be, which it then
+threw away: on the Minecraft server 624,000 receivers in 65 million words, half a gigabyte at
+the run's peak, and 8.6 s of the phase's 19 s of walks. It now takes what the first walk found
+the calls run and what it knows, and records neither. The first walk keeps the classes of each
+list of targets once, and a receiver's classes are the union of those of the lists its calls
+ran, which shares their words while it has one. Whether the class of an expression's type is an
+enum is looked up by the address of the name, whether the points-to analysis followed a method
+on a class by a binary search of its contexts, and the `catch` clauses whose types no running
+code creates only in methods that have one. And a walk of a method goes over the steps of the
+method found once (`Steps`), in the order of its body, rather than over its whole body three
+times (for what it runs, for the values of its locals and for its dead code), each time over
+every expression twice. The methods, classes, receivers, tested values and unresolved calls are
+the same (`JAVA_TO_RUST_LIVE_CHECK`), and so is javac's census, byte for byte. On javac's census
+(release translator, instructions sampled with perf, every walk of both lowering attempts), the
+walks take 12.2 G instructions rather than 20.1 G, of which the walks of the started threads
+take 4.0 G rather than 9.3 G.
+
 **A points-to analysis that works per call, not per target.** The points-to analysis for dispatch
 (`object_values::analyze_for_dispatch`) runs before each walk of the methods that can run, and
 on the Minecraft server it took about 290 s each time (3.3 million runs of 1.1 million visits).

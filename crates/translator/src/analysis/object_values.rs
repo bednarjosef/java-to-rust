@@ -239,7 +239,7 @@ impl ClassSet {
     }
 
     /// Adds the classes of `other`; whether that added any.
-    fn union(&mut self, other: &ClassSet) -> bool {
+    pub(super) fn union(&mut self, other: &ClassSet) -> bool {
         // A copy of this set (copies share their words) adds nothing.
         if self.start == other.start && Rc::ptr_eq(&self.words, &other.words) {
             return false;
@@ -383,7 +383,8 @@ pub struct ObjectValues {
     /// For dispatch, the objects that the runtime holds: those given to a builtin
     /// (`hands_objects`), the operands of a string concatenation, and the exceptions thrown.
     handed: Flow,
-    /// The classes whose objects run each method, `STATIC` for one without `this`.
+    /// The classes whose objects run each method, `STATIC` for one without `this`, in ascending
+    /// order (so that a walk finds whether one runs it by a binary search).
     pub(super) contexts: Vec<Vec<usize>>,
     /// For dispatch, the `Class` values that the lookups of the reflection table get, by kind
     /// (`table_kind`): the classes they look members up in (`ReflectionTable::lookups`).
