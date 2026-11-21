@@ -309,8 +309,10 @@ initialization is observable:
 
 - its `<clinit>` (the code inside the `try` of a rewritten one, `lower::clinit_errors`) is only
   assignments to statics of its class, and, for an enum whose fields are tables
-  (`lower/enum_tables.rs`), calls of its constant builders that only fill rows of its tables
-  with their parameters or literals (`inert_builder`);
+  (`lower/enum_tables.rs`), calls of its constant builders that only fill rows of its tables and
+  call each other, with their parameters, null, literals, constants of any class and constants
+  of enums as the next item allows them (`inert_builder`): the short constructors of javac's
+  token kinds pass the long one `Tag.DEFAULT`;
 - each assigned value or argument reads only literals, constants of any class, statics of its
   class assigned before, and constants of enums, its own or one that is not eager or is
   initialized this way too,
@@ -326,8 +328,8 @@ Since such a class is initialized before any code that could use it runs, nothin
 it is: its static methods and constructors start with no call of its `init`, and a read of its
 statics or constants from another class has none either (`Facts::initialized_first`). The code
 that runs before, the other such initializations, names nothing of it but constants and the
-values of its enum constants, which need no initialization. In javac, the enums of tree tags and
-type tags are such enums, whose constants nearly every method reads.
+values of its enum constants, which need no initialization. In javac, the enums of tree tags, type
+tags and token kinds are such enums, whose constants nearly every method reads.
 
 A class that prints, reads a static another class changes, or may throw keeps its initialization
 at its first use (corpus `threads/EarlyStaticInitializers`), and so does an enum whose constants

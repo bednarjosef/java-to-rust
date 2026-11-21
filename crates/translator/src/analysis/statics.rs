@@ -137,7 +137,7 @@ pub fn early(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
                         }
                         ExprKind::Call { resolved: Some(k), args, .. } => {
                             class.methods[*k].class == t
-                                && inert_builder(class, *k, &mut FastSet::default())
+                                && inert_builder(class, *k, &mut FastSet::default(), &mut named)
                                 && args.iter().all(|a| {
                                     matches!(a.kind, ExprKind::Null)
                                         || inert(a, t, &assigned, decl, &new, &mut named)
@@ -170,20 +170,28 @@ pub fn early(class: &Class, eager: &FastSet<usize>) -> FastSet<usize> {
 }
 
 /// Whether method `k` is a builder of its enum's constants that only fills rows of the enum's
-/// tables (`table[constantOrdinal] = v`, where `v` is a parameter, a literal or null) and calls other
-/// such builders, with parameters or literals (`this(..)` of a constructor, or the builder of the
-/// fields of the constants' bodies). Called with `inert` arguments, it has no effect but filling
-/// its rows, and cannot throw: the ordinals are those of the constants. `seen` holds the builders
-/// being checked, against a loop.
-fn inert_builder(class: &Class, k: usize, seen: &mut FastSet<usize>) -> bool {
+/// tables (`table[constantOrdinal] = v`) and calls other such builders (`this(..)` of a
+/// constructor, or the builder of the fields of the constants' bodies), with values that are
+/// parameters, null, or what `inert` accepts with no static but constants, no `new`, and the enum
+/// constants that `named` accepts: javac's `TokenKind(String name)` is `this(name, Tag.DEFAULT)`.
+/// Called with `inert` arguments, it has no effect but filling its rows, and cannot throw: the
+/// ordinals are those of the constants. `seen` holds the builders being checked, against a loop.
+fn inert_builder(
+    class: &Class,
+    k: usize,
+    seen: &mut FastSet<usize>,
+    named: &mut dyn FnMut(usize, Option<&str>) -> bool,
+) -> bool {
     let m = &class.methods[k];
     if !class.builds_constants(k) || !seen.insert(k) {
         return false;
     }
     let decl = &class.types[m.class];
     let param = |e: &Expr| matches!(&e.kind, ExprKind::Var(v) if m.params.iter().any(|p| p.name == *v));
-    let value = |e: &Expr| {
-        param(e) || matches!(e.kind, ExprKind::Null) || pure(e, usize::MAX, &FastSet::default(), decl)
+    let value = |e: &Expr, named: &mut dyn FnMut(usize, Option<&str>) -> bool| {
+        param(e)
+            || matches!(e.kind, ExprKind::Null)
+            || inert(e, usize::MAX, &FastSet::default(), decl, &|_| false, named)
     };
     m.body.iter().all(|stmt| match stmt {
         Stmt::Return(None, _) => true,
@@ -194,12 +202,12 @@ fn inert_builder(class: &Class, k: usize, seen: &mut FastSet<usize>) -> bool {
             matches!(&array.kind, ExprKind::Static { class: c, name }
                 if *c == m.class && crate::lower::tabled_field(name).is_some())
                 && matches!(&index.kind, ExprKind::Var(v) if v == crate::lower::TABLE_ORDINAL)
-                && value(v)
+                && value(v, &mut *named)
         }
         Stmt::Expr(Expr { kind: ExprKind::Call { resolved: Some(callee), args, .. }, .. }) => {
             class.methods[*callee].class == m.class
-                && args.iter().all(value)
-                && inert_builder(class, *callee, seen)
+                && args.iter().all(|a| value(a, &mut *named))
+                && inert_builder(class, *callee, seen, &mut *named)
         }
         _ => false,
     })

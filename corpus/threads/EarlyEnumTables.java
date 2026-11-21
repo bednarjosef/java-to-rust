@@ -2,8 +2,8 @@
 // (their fields become tables that the enum's static initialization fills), read from worker
 // threads in a loop. Those whose initialization nothing can observe may run before main does
 // anything, and are then read with no test of whether they are initialized; an enum whose
-// constructor prints, and one whose constants are built from that enum's constants, must still
-// initialize at their first use, in Java's order.
+// constructor prints, and those whose constants or constructors name that enum's constants, must
+// still initialize at their first use, in Java's order.
 public class EarlyEnumTables {
     static final class Bits {
         static final int TYPE = 1;
@@ -70,6 +70,35 @@ public class EarlyEnumTables {
         }
     }
 
+    // Its short constructors pass the long one a constant of Category, as javac's TokenKind passes
+    // Tag.DEFAULT.
+    enum Token {
+        EOF,
+        IDENT(Category.TARGET),
+        ARROW("->"),
+        DOT(".", Category.ERROR);
+
+        final String name;
+        final Category category;
+
+        Token() {
+            this(null, Category.BASIC);
+        }
+
+        Token(String name) {
+            this(name, Category.BASIC);
+        }
+
+        Token(Category category) {
+            this(null, category);
+        }
+
+        Token(String name, Category category) {
+            this.name = name;
+            this.category = category;
+        }
+    }
+
     // Prints as it builds its constants: it initializes at its first use.
     enum Noisy {
         LOUD("loud"),
@@ -97,11 +126,36 @@ public class EarlyEnumTables {
         }
     }
 
+    // Its constructor passes a constant of Noisy to the other one: initializing it initializes
+    // Noisy, which prints.
+    enum Relay {
+        NEAR,
+        FAR;
+
+        final Noisy via;
+
+        Relay() {
+            this(Noisy.QUIET);
+        }
+
+        Relay(Noisy via) {
+            this.via = via;
+        }
+    }
+
     static long walk(int seed, int rounds) {
         Kind[] kinds = Kind.values();
+        Token[] tokens = Token.values();
         long sum = 0;
         for (int i = 0; i < rounds; i++) {
             Kind k = kinds[(seed + i) % kinds.length];
+            Token token = tokens[(seed + i) % tokens.length];
+            if (token.category == Category.BASIC) {
+                sum += 5;
+            }
+            if (token.name != null) {
+                sum += token.name.length();
+            }
             sum += k.depth() + k.selector.bits + Kind.SPAN;
             if (k.selector.contains(Selector.TYP)) {
                 sum += 7;
@@ -126,9 +180,12 @@ public class EarlyEnumTables {
             t.join();
         }
         System.out.println("sums " + sums[0] + " " + sums[1] + " " + sums[2]);
+        System.out.println("before relay");
+        System.out.println("relay " + Relay.FAR.via.word);
         System.out.println("before echo");
         System.out.println("echo " + Echo.SECOND.source.word + " x" + Echo.SECOND.times);
         System.out.println("noisy " + Noisy.LOUD.word);
         System.out.println("kind " + Kind.CTOR + " " + Kind.CTOR.depth() + " " + Kind.CTOR.selector.category);
+        System.out.println("token " + Token.DOT + " " + Token.DOT.name + " " + Token.IDENT.category);
     }
 }
