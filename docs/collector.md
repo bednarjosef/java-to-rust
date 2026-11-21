@@ -540,15 +540,28 @@ keeps what it read lately while memory is plentiful.
 ## Threads
 
 The runtime's `pthread_create` takes the C library's place: it registers the new thread (its
-stack and thread pointer) as the first thing the thread does, and no collection runs between the
-call and the registration, while the closure the thread runs is only known to the C library. A
-thread unregisters when it ends; its later frees during its exit go straight back to the heap.
+stack and thread pointer) as the first thing the thread does. Until then the closure the thread
+runs is only in memory of the C library, which is not scanned, so `pthread_create` also keeps it
+in one of 64 entries in the static data (`STARTING`), which the thread clears once registered;
+collections run meanwhile. They used to wait until no thread was starting, and
+ManyThreadsAllocating, whose 32 threads allocate while the main thread starts the next, then
+took 432-752 MB before its first collection instead of 64 MB when held to one or two processors
+(`taskset`), where a new thread waits long to run as on a loaded machine, and peaked at
+525-881 MB; it now peaks at 134-154 MB there (Java: 420-455 MB), and on a loaded machine had
+reached up to 610 MB. A thread started while every entry is taken still holds collections off
+until it registers. A thread unregisters when it ends; its
+later frees during its exit go straight back to the heap.
 
 ## Testing it
 
 - `JAVA_GC_EVERY=<bytes>` collects after that many bytes instead, down to a collection every
   few allocations, so that a pointer the collector misses shows quickly as a crash or wrong
   output. A change to the collector or the runtime is checked by running the corpus with it set.
+- `JAVA_GC_START_DELAY=<milliseconds>` holds every starting thread that long before it
+  registers, so that collections run while its closure is kept only by its entry of `STARTING`.
+  `tests/thread_starts.rs` starts threads whose closures hold the only handles of objects that
+  weak references watch, takes new spans in every size, collects, and finds no referent cleared;
+  with the entries holding something else, it finds them cleared.
 - `JAVA_GC_THREADS=<n>` marks with `n` markers in all, and with more than one marks in parallel
   at every collection however small, which with `JAVA_GC_EVERY` tests the parallel marking.
 - `JAVA_GC_LOG=1` writes a line per collection to standard error: whether it was minor or full,
@@ -597,6 +610,6 @@ thread unregisters when it ends; its later frees during its exit go straight bac
   program allocates is in the heap or, for objects on the stack, in a frame that is scanned;
   statics and thread-local storage are scanned, and the only
   memory outside them is the C library's own, which holds no handles except a starting thread's
-  closure (covered above).
+  closure, which `STARTING` keeps (see "Threads").
 - The plan for a faster and smaller heap (objects without headers, 4-byte references) is in
   docs/native-speed.md.
