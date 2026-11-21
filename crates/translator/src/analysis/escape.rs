@@ -61,6 +61,14 @@
 //! not held past its iteration by an earlier `for (Node n = head; ..)` outside the loop. A name
 //! with a mention that no declaration in scope covers (a pattern variable) is one variable.
 //!
+//! **Objects being built.** Once the summaries are final, a class's objects are *built alone*
+//! when no method that builds one (`Class::constructs`: a constructor of its class or of a
+//! superclass, or a method that `whole_objects` made of one) lets `this` escape, for an object of
+//! that class, so no other code, on any thread, can hold the object until its `new` is done
+//! (`StackObjects::built_alone`). The fixed fields of a program with threads take that from here
+//! (`fixed_fields`): a constructor that calls a method on `this` or passes it to code that keeps
+//! it nowhere does not hand it to a thread it may start.
+//!
 //! **Cost.** Each method's code is walked once and reduced to its flows (`Compiled`): numbered
 //! variables (the results of calls among them), what each assignment gives each, its calls with
 //! their arguments, and what escapes or is returned. Solving a method again when a callee's
@@ -164,6 +172,9 @@ pub struct StackObjects {
     /// The methods that the calls on `confined` receivers may run, and those that these call on
     /// `this`, that do something atomic to `this` (see `confined`).
     pub confined_methods: FastSet<usize>,
+    /// The classes with instance fields whose objects, and those of every subclass, are built
+    /// alone (see **Objects being built**).
+    pub built_alone: FastSet<usize>,
 }
 
 /// An object that starts in a slot and is moved to the heap before the statements where it may
@@ -398,6 +409,7 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     if let Ok(wanted) = std::env::var("JAVA_TO_RUST_ESCAPE_WHY") {
         analysis.explain_all(class, &wanted);
     }
+    found.built_alone = analysis.built_alone(class);
     found.factories = analysis.factories.into_iter().collect();
     (found.confined, found.confined_methods) = confined::receivers(class, &found);
     found
@@ -1951,6 +1963,32 @@ impl Analysis<'_> {
             Some(t) => self.factories[&t].class,
             None => site.class,
         }
+    }
+
+    /// `StackObjects::built_alone`, with the final summaries: a concrete class whose objects some
+    /// method that builds them lets escape, and its superclasses, which its objects are too, are
+    /// not built alone.
+    fn built_alone(&self, class: &Class) -> FastSet<usize> {
+        let mut builds: Vec<Vec<usize>> = vec![Vec::new(); class.types.len()];
+        for m in (0..class.methods.len()).filter(|&m| class.constructs(m)) {
+            builds[class.methods[m].class].push(m);
+        }
+        let mut not_alone = vec![false; class.types.len()];
+        for c in (0..class.types.len()).filter(|&c| self.hierarchy.is_concrete(c)) {
+            let ancestors = self.hierarchy.ancestors(c);
+            let alone = std::iter::once(c).chain(ancestors.iter().copied()).all(|d| {
+                builds[d].iter().all(|&m| {
+                    self.summaries[m].escapes.first().is_some_and(|this| !self.escapes_as(this, Some(c)))
+                })
+            });
+            if !alone {
+                not_alone[c] = true;
+                for a in ancestors {
+                    not_alone[a] = true;
+                }
+            }
+        }
+        (0..class.types.len()).filter(|&t| !not_alone[t] && !class.types[t].fields.is_empty()).collect()
     }
 
     /// Whether what an object of class `c` runs for method `r` (called on it) lets its `this`

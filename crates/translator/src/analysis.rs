@@ -275,7 +275,8 @@ pub struct Facts {
     /// qualified name.
     pub field_owners: FastMap<(String, String), String>,
     /// The instance fields that only constructors write, through `this`, by declaring type and
-    /// name: their reads borrow the field alone (see `fixed_fields`).
+    /// name: their reads borrow the field alone (see `fixed_fields`). Those of classes built
+    /// alone join them with the stack objects (`Analysed::with_stack_objects`).
     pub fixed_fields: FastSet<(usize, String)>,
     /// The methods and constructors that return `Result<_, Throwable>`: some caller observes an
     /// exception that may escape them (see `exceptions`).
@@ -424,16 +425,24 @@ fn represented(class: &Class) -> Represented {
 pub struct Analysed {
     pub facts: Facts,
     stack_objects: alongside::Done<Option<escape::StackObjects>>,
+    /// The fields that are fixed if their class's objects are built alone
+    /// (`fixed_fields::FixedFields::if_built_alone`).
+    fixed_if_built_alone: Vec<(usize, String)>,
 }
 
 impl Analysed {
     /// The facts with the objects that stay on the stack (`Facts::stack_objects`), the last of
-    /// the facts, which no check reads: a census takes them after its last check of the analyses,
-    /// the messages of `NullPointerException`s (`program/census.rs`). None with
-    /// `JAVA_TO_RUST_HEAP_ONLY` set.
+    /// the facts, which no check reads, and the fixed fields that the escape analysis adds: a
+    /// census takes them after its last check of the analyses, the messages of
+    /// `NullPointerException`s (`program/census.rs`). None with `JAVA_TO_RUST_HEAP_ONLY` set.
     pub fn with_stack_objects(self) -> Facts {
         let mut facts = self.facts;
         if let Some(found) = self.stack_objects.take() {
+            // The fields that only constructors write of the classes that the escape analysis
+            // finds are built alone are fixed (see `fixed_fields`).
+            facts
+                .fixed_fields
+                .extend(self.fixed_if_built_alone.into_iter().filter(|(t, _)| found.built_alone.contains(t)));
             facts.stack_objects = found;
         }
         facts
@@ -443,7 +452,7 @@ impl Analysed {
 /// What the analyses find from the code alone, after the checks (`analyze_from`).
 struct FromCode<'scope> {
     ranges: Facts,
-    fixed_fields: FastSet<(usize, String)>,
+    fixed_fields: fixed_fields::FixedFields,
     eager_init: FastSet<usize>,
     early_init: FastSet<usize>,
     final_statics: FastSet<(usize, String)>,
@@ -609,7 +618,8 @@ fn analyze_with(
             facts.safe_division = ranges.safe_division.clone();
             facts.ascii_chars = ranges.ascii_chars.clone();
             facts.index_ranges = ranges.index_ranges.clone();
-            facts.fixed_fields = fixed_fields;
+            facts.fixed_fields = fixed_fields.fixed;
+            let fixed_if_built_alone = fixed_fields.if_built_alone;
             facts.eager_init = eager_init;
             facts.early_init = early_init;
             facts.final_statics = final_statics;
@@ -629,7 +639,7 @@ fn analyze_with(
                         borrowed_objects(class, &facts);
                 })
             });
-            (facts, ranges, borrowing, ascii_length)
+            (facts, ranges, borrowing, ascii_length, fixed_if_built_alone)
         });
         let (identity_checks, object_values) =
             phase("analysis: object values", || patterns::check_object_values(class, &found.facts));
@@ -646,7 +656,7 @@ fn analyze_with(
         })();
         let faithful_boxes = std::mem::take(&mut found.facts.faithful_boxes);
         checks?;
-        let (mut facts, ranges, borrowing, ascii_length) = nullness.join();
+        let (mut facts, ranges, borrowing, ascii_length, fixed_if_built_alone) = nullness.join();
         found.ranges = Some(ranges);
         facts.identity_checks = identity_checks;
         facts.faithful_boxes = faithful_boxes;
@@ -673,7 +683,7 @@ fn analyze_with(
                 hierarchy::flows(class, &facts.field_level, &facts.raised_classes)
             });
         }
-        Ok(Analysed { facts, stack_objects: stack_objects.finish() })
+        Ok(Analysed { facts, stack_objects: stack_objects.finish(), fixed_if_built_alone })
     })
 }
 

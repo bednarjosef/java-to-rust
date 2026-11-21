@@ -16,12 +16,29 @@
 //! field initializer of the class or of a superclass does, that is every write; a subclass's
 //! constructor runs only once they are done. (Java promises nothing for a `final` field that
 //! another thread reads while the constructor runs either; here the read must not race.)
+//!
+//! The fields left out so are fixed after all when the objects of their class are built alone:
+//! the escape analysis finds that no method that builds one lets `this` escape
+//! (`StackObjects::built_alone`), so whatever a constructor does with `this`, such as calling a
+//! method on it or passing it to a lambda that keeps it nowhere, no other code holds the object
+//! until it is built. That analysis runs alongside this one, so these fields
+//! (`FixedFields::if_built_alone`) join the others once it is done
+//! (`Analysed::with_stack_objects`); the analyses before that see them as not fixed.
 
 use super::{FastMap, FastSet};
 use crate::ast::*;
 
 /// The fixed fields, by the type that declares them and their name.
-pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
+pub struct FixedFields {
+    pub fixed: FastSet<(usize, String)>,
+    /// The fields that only constructors write but that are not fixed for the threads a
+    /// constructor may start, which are if the objects of their class are built alone (see the
+    /// module's comment).
+    pub if_built_alone: Vec<(usize, String)>,
+}
+
+/// The fixed fields (see the module's comment).
+pub fn fixed_fields(class: &Class, threaded: bool) -> FixedFields {
     let mut written = FastSet::default();
     let mut written_names = FastSet::default();
     // The classes whose constructors (or field initializers) write each field through `this`.
@@ -67,6 +84,7 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
     let leaking = if unsafe_classes.is_empty() { FastSet::default() } else { leaking_this(class) };
     let late = if unsafe_classes.is_empty() { FastSet::default() } else { written_late(class, &leaking) };
     let mut fixed = FastSet::default();
+    let mut if_built_alone = Vec::new();
     for (t, decl) in class.types.iter().enumerate() {
         // Whether the constructors that run before any other code can hold the object never let
         // `this` leave (see the module's comment).
@@ -80,10 +98,12 @@ pub fn fixed_fields(class: &Class, threaded: bool) -> FastSet<(usize, String)> {
             let own = writers.get(&key).is_none_or(|w| w.iter().all(|&c| c == t));
             if !unsafe_classes.contains(&t) || (own && (kept() || !late.contains(&key))) {
                 fixed.insert(key);
+            } else {
+                if_built_alone.push(key);
             }
         }
     }
-    fixed
+    FixedFields { fixed, if_built_alone }
 }
 
 /// The classes some of whose constructors or field initializers use `this` as a value: anything

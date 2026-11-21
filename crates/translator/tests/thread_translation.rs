@@ -874,6 +874,60 @@ class A {
     assert_lacks(&rust, &[".keys.get()", ".emission.fixed()"]);
 }
 
+/// A program whose `Gauge` constructor calls a method on `this`, hands it to `Labels.describe`,
+/// whose body is `describe`, and may start a thread.
+fn gauge_program(describe: &str) -> String {
+    format!(
+        "class A {{
+    static Gauge last;
+    static void aside() {{
+        Thread t = new Thread(() -> System.out.println(\"started\"));
+        t.start();
+        try {{ t.join(); }} catch (InterruptedException e) {{ }}
+    }}
+    static final class Labels {{
+        static String describe(Gauge g, String s) {{ {describe} }}
+    }}
+    static final class Gauge {{
+        final int low;
+        final int high;
+        final String label;
+        Gauge(int low, String label) {{
+            this.low = low;
+            this.high = low + this.width();
+            this.label = Labels.describe(this, label);
+            if (low > 2) aside();
+        }}
+        int width() {{ return low * 2 + 1; }}
+    }}
+    public static void main(String[] args) throws InterruptedException {{
+        Gauge g = new Gauge(3, \"x\");
+        Thread reader = new Thread(() -> System.out.println(g.high + g.label));
+        reader.start();
+        reader.join();
+        System.out.println(g.low);
+    }}
+}}"
+    )
+}
+
+#[test]
+fn the_fields_of_a_class_whose_constructors_keep_this_nowhere_stay_fixed() {
+    // `Gauge`'s constructor may start a thread and uses `this` before it writes `high` and
+    // `label`, but neither `width` nor `describe` keeps it anywhere, so no thread can hold the
+    // object before it is built.
+    let rust = translate(&gauge_program("return s + g.low;"));
+    assert_contains(&rust, &[".high.fixed()", ".label.fixed()"]);
+    assert_lacks(&rust, &[".high.get()", ".label.get()"]);
+}
+
+#[test]
+fn the_fields_written_after_this_is_stored_where_a_thread_may_read_it_are_not_fixed() {
+    let rust = translate(&gauge_program("last = g; return s;"));
+    assert_contains(&rust, &[".low.fixed()", ".high.get()", ".label.get()"]);
+    assert_lacks(&rust, &[".high.fixed()", ".label.fixed()"]);
+}
+
 #[test]
 fn fields_written_before_this_leaves_the_constructor_stay_fixed() {
     let rust = translate(
