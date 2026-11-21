@@ -169,10 +169,12 @@ program where such a lookup can happen, so they can be checked before the progra
   reachability on, with that class among the candidates of lookups of that kind
   (`Program::flow_classes`), so that a lookup never silently finds nothing
   (`corpus/whole-program/LookupsOnClassesWithoutLiterals.java`); each round adds classes, so the
-  rounds end. Where the facts say a lookup of a kind may get any class, its candidates stay
-  reachability's. The `Class` values in arrays are kept apart by where each array was made
-  (`Class[][]` and the arrays inside it too), so a read of an element of an array gets those
-  stored in arrays made where it was, unless the facts do not follow the array (a library's
+  rounds end. A census taken again so takes the units that javac gave the one before, round by
+  round, for as long as its walk asks for the same classes, and starts javac only where it asks
+  for others (`program::Earlier`). Where the facts say a lookup of a kind may get any class, its
+  candidates stay reachability's. The `Class` values in arrays are kept apart by where each array
+  was made (`Class[][]` and the arrays inside it too), so a read of an element of an array gets
+  those stored in arrays made where it was, unless the facts do not follow the array (a library's
   result), when it gets those of every array, and what is stored through such an array goes to
   every array that the runtime was given (`corpus/whole-program/ClassValuesInArrays.java`). Each
   table's data is in a class of its own (`MethodTableData`, `FieldTableData`,

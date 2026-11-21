@@ -135,13 +135,13 @@ pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
 /// take for its candidates (`analysis::reflection_table::missing`), the program is translated
 /// again with them (`Program::flow_classes`).
 pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, ProgramError> {
-    let (units, reach, asked) = load(program, Reaching::Walk(false))?;
+    let (units, reach, asked, _) = load(program, Reaching::Walk(false), None)?;
     let Some(asked) = asked else {
         return match translate_reached(program, units, reach, Writes::Without)? {
             Translated::Done(tree) => Ok(tree),
             Translated::Flow(missing) => translate_program_modules(&with_flow_classes(program, missing)),
             Translated::Again(_, _) => {
-                let (units, reach, _) = load(program, Reaching::Walk(true))?;
+                let (units, reach, ..) = load(program, Reaching::Walk(true), None)?;
                 match translate_reached(program, units, reach, Writes::With)? {
                     Translated::Done(tree) => Ok(tree),
                     Translated::Flow(missing) => {
@@ -162,8 +162,8 @@ pub fn translate_program_modules(program: &Program) -> Result<ModuleTree, Progra
             Translated::Again(again, next) => {
                 // javac's trees were let go: javac is asked for the same units again.
                 (units, reach, writes) =
-                    load(program, Reaching::Replay(asked.clone(), again, next != Writes::Without))
-                        .map(|(units, reach, _)| (units, reach, next))?;
+                    load(program, Reaching::Replay(asked.clone(), again, next != Writes::Without), None)
+                        .map(|(units, reach, ..)| (units, reach, next))?;
             }
         }
     }
@@ -445,15 +445,25 @@ fn narrow(
 /// same classes, get the same units in the same order and reach the same, so the program is
 /// lowered with them over these units and reach, or a load with them takes those instead of
 /// walking again (`Reaching::Replay`).
-fn load(program: &Program, reaching: Reaching) -> Result<(Vec<Value>, Reach, Option<Asked>), ProgramError> {
+///
+/// A load of a program that an earlier load of it (`earlier`, with other classes for the lookups
+/// of the reflection table, or with the writes) asked javac for units, takes the units that javac
+/// gave that load for as long as it asks for the same (`Earlier`). The load gives what javac gave
+/// it, round by round (`Transcript`), for a later one.
+fn load(program: &Program, reaching: Reaching, earlier: Option<Earlier>) -> Result<Load, ProgramError> {
     match reaching {
-        Reaching::Walk(string_array_writes) => load_in_rounds(program, string_array_writes),
+        Reaching::Walk(string_array_writes) => load_in_rounds(program, string_array_writes, earlier),
         Reaching::Replay(asked, mut reach, string_array_writes) => {
             reach.string_array_writes = string_array_writes;
-            Ok((replay(program, &asked)?, *reach, None))
+            Ok((replay(program, &asked)?, *reach, None, None))
         }
     }
 }
+
+/// What `load` gives: the units, what they reach, what each round asked javac for when the
+/// rounds would ask for the same with the writes of `String` arrays, and what javac gave the load
+/// when it asked javac.
+type Load = (Vec<Value>, Reach, Option<Asked>, Option<Transcript>);
 
 /// How `load` gets the units of a program and what they reach.
 enum Reaching {
@@ -472,11 +482,161 @@ enum Reaching {
 #[derive(Clone)]
 struct Asked(Vec<(Vec<String>, Vec<reach::ProxyClass>, usize)>);
 
+/// What javac gave a load (`load_in_rounds`), for a later load of the same program
+/// (`Earlier`): how many units it gave for the program's files and in each round, with what the
+/// round asked for, and the units whose records the load completed, as javac gave them.
+struct Transcript {
+    /// The units of the program's files, and the bytes of their trees.
+    first: (usize, usize),
+    rounds: Vec<Round>,
+    /// The units whose records were completed, by index, as javac gave them.
+    raw: Vec<(usize, Value)>,
+}
+
+/// A round of a load: the classes and the proxy classes (`reach::ProxyClass`) it asked javac for,
+/// and how many units, of how many bytes of trees, javac gave for them.
+struct Round {
+    classes: Vec<String>,
+    made: Vec<reach::ProxyClass>,
+    units: usize,
+    bytes: usize,
+}
+
+/// The units that javac gave a load, as it gave them, for a later load of the same program: those
+/// of the program's files, and those of each round, with what the round asked for. javac gives
+/// the same units for the same questions asked in the same order (as `replay` takes it), so a
+/// round that asks for what the earlier load's round asked for takes the units given then.
+struct Earlier {
+    first: (Vec<Value>, usize),
+    rounds: std::collections::VecDeque<(Round, Vec<Value>)>,
+}
+
+impl Earlier {
+    /// The units of a load (`units`, as `load` gives them, with their records completed) as javac
+    /// gave them, by its transcript.
+    fn new(transcript: Transcript, mut units: Vec<Value>) -> Earlier {
+        for (index, raw) in transcript.raw {
+            units[index] = raw;
+        }
+        let mut units = units.into_iter();
+        let first = (units.by_ref().take(transcript.first.0).collect(), transcript.first.1);
+        let rounds = transcript
+            .rounds
+            .into_iter()
+            .map(|round| {
+                let given = units.by_ref().take(round.units).collect();
+                (round, given)
+            })
+            .collect();
+        Earlier { first, rounds }
+    }
+}
+
+/// Where a load gets its units: from javac, or from what javac gave an earlier load of the same
+/// program (`Earlier`), for as long as the load asks for what that load asked for. javac is
+/// started only once the load asks for something else, and is first asked for what the load
+/// asked for before, round by round, so that it gives what it would have given the load from its
+/// start.
+struct Units<'s> {
+    /// Starts javac on the program's files.
+    start: &'s dyn Fn() -> Result<(javac::Session, Vec<Value>), ProgramError>,
+    /// What a compile error of javac's is, as an error of the program.
+    explain: &'s dyn Fn((Option<String>, Error)) -> ProgramError,
+    session: Option<javac::Session>,
+    earlier: Option<Earlier>,
+    /// What each round so far asked for, as `javac::Session::load` takes it, and how many units
+    /// came for it.
+    sent: Vec<(Vec<String>, usize)>,
+    /// How many units came for the program's files.
+    first: usize,
+    /// The bytes of the trees received so far.
+    received: usize,
+    /// How many rounds took the units of the earlier load, when there was one.
+    taken: Option<usize>,
+}
+
+impl<'s> Units<'s> {
+    /// The units of the program's files.
+    fn start(
+        start: &'s dyn Fn() -> Result<(javac::Session, Vec<Value>), ProgramError>,
+        explain: &'s dyn Fn((Option<String>, Error)) -> ProgramError,
+        earlier: Option<Earlier>,
+    ) -> Result<(Units<'s>, Vec<Value>), ProgramError> {
+        let taken = earlier.as_ref().map(|_| 0);
+        let mut units =
+            Units { start, explain, session: None, earlier, sent: Vec::new(), first: 0, received: 0, taken };
+        let first = match units.earlier.as_mut() {
+            Some(earlier) => {
+                let (first, bytes) = std::mem::take(&mut earlier.first);
+                units.received = bytes;
+                first
+            }
+            None => {
+                let (session, first) = start()?;
+                units.received = session.received;
+                units.session = Some(session);
+                first
+            }
+        };
+        units.first = first.len();
+        Ok((units, first))
+    }
+
+    /// The units that javac gives for the classes `classes` and the proxy classes `made`, whose
+    /// files `line` names after the classes, as `javac::Session::load` takes them; with the bytes
+    /// of their trees.
+    fn load(
+        &mut self,
+        classes: &[String],
+        made: &[reach::ProxyClass],
+        line: Vec<String>,
+    ) -> Result<(Vec<Value>, usize), ProgramError> {
+        let same = |(round, _): &(Round, Vec<Value>)| round.classes == classes && round.made == made;
+        let (units, bytes) = match self.earlier.as_mut().filter(|e| e.rounds.front().is_some_and(same)) {
+            Some(earlier) => {
+                let (round, units) = earlier.rounds.pop_front().expect("a round to take");
+                *self.taken.as_mut().expect("an earlier load") += 1;
+                (units, round.bytes)
+            }
+            None => {
+                self.earlier = None;
+                if self.session.is_none() {
+                    self.session = Some(self.started()?);
+                }
+                let session = self.session.as_mut().expect("javac is started");
+                let before = session.received;
+                let units = session.load(&line).map_err(self.explain)?;
+                (units, session.received - before)
+            }
+        };
+        self.sent.push((line, units.len()));
+        self.received += bytes;
+        Ok((units, bytes))
+    }
+
+    /// javac, started once the load asks for what the earlier load did not: asked for what each
+    /// round so far asked for, for which it gives the units that came for them.
+    fn started(&self) -> Result<javac::Session, ProgramError> {
+        let (mut session, first) = (self.start)()?;
+        let mut given = vec![(first.len(), self.first)];
+        for (line, before) in &self.sent {
+            given.push((session.load(line).map_err(self.explain)?.len(), *before));
+        }
+        match given.into_iter().find(|(now, before)| now != before) {
+            Some((now, before)) => Err(fail(format!(
+                "javac gave {now} units where it gave {before} for the same classes before"
+            ))),
+            None => Ok(session),
+        }
+    }
+}
+
 /// `load` by walking in rounds (`Reaching::Walk`).
 fn load_in_rounds(
     program: &Program,
     string_array_writes: bool,
-) -> Result<(Vec<Value>, Reach, Option<Asked>), ProgramError> {
+    earlier: Option<Earlier>,
+) -> Result<Load, ProgramError> {
     let files = source_files(program)?;
     let modules = modules::modules(program.sources.iter().chain(&program.libraries));
     let javac_error = |(file, error)| modules::explain(ProgramError { file, error }, &modules);
@@ -484,14 +644,19 @@ fn load_in_rounds(
     let start = std::time::Instant::now();
     // Where the proxy classes that reachability finds are written (`reach::ProxyClass`).
     let proxies = ProxySources::new(program).map_err(fail)?;
-    let (mut session, mut new) = javac::Session::start(
-        &files,
-        &sourcepath(program),
-        modules::kept(&modules),
-        patches(program),
-        program.keep_going,
-    )
-    .map_err(javac_error)?;
+    let start_javac = || {
+        javac::Session::start(
+            &files,
+            &sourcepath(program),
+            modules::kept(&modules),
+            patches(program),
+            program.keep_going,
+        )
+        .map_err(javac_error)
+    };
+    let (mut source, mut new) = Units::start(&start_javac, &javac_error, earlier)?;
+    let mut transcript =
+        Transcript { first: (new.len(), source.received), rounds: Vec::new(), raw: Vec::new() };
     javac += start.elapsed();
     // The units as javac gave them, and the copies of those whose records were completed.
     let (given, completed) = (Store::default(), Store::default());
@@ -593,18 +758,21 @@ fn load_in_rounds(
             .filter(|class| asked_so_far.insert(class.clone()))
             .collect();
         asked.retain(|class| !made.iter().any(|m| m.class == *class));
-        let classes = asked_in_rounds.is_some().then(|| asked.clone());
-        asked.extend(proxies.write(&made).map_err(fail)?.iter().map(|file| format!("+{}", file.display())));
+        let classes = asked.clone();
+        let mut line = asked;
+        line.extend(proxies.write(&made).map_err(fail)?.iter().map(|file| format!("+{}", file.display())));
         let start = std::time::Instant::now();
-        new = session.load(&asked).map_err(javac_error)?;
+        let bytes;
+        (new, bytes) = source.load(&classes, &made, line)?;
         javac += start.elapsed();
         rounds.asked(&newly);
-        if let (Some(asked), Some(classes)) = (&mut asked_in_rounds, classes) {
-            asked.push((classes, made, new.len()));
+        if let Some(asked) = &mut asked_in_rounds {
+            asked.push((classes.clone(), made.clone(), new.len()));
         }
+        transcript.rounds.push(Round { classes, made, units: new.len(), bytes });
         if crate::timings::enabled() {
             // Each round as it ends, for a program whose loading takes long.
-            let received = session.received as f64 / 1e6;
+            let received = source.received as f64 / 1e6;
             let again = match walked.len() {
                 _ if restart => ", from the start again".to_string(),
                 0 => String::new(),
@@ -637,6 +805,7 @@ fn load_in_rounds(
     let changing: Vec<usize> = changing.iter().map(|&(index, ..)| index).collect();
     let mut units = given.into_values();
     for index in changing {
+        transcript.raw.push((index, units[index].clone()));
         records.complete(&mut units[index]);
     }
     let file_name = |u: &Value| u["file"].as_str().map(|f| f.rsplit('/').next().unwrap_or(f).to_string());
@@ -645,8 +814,15 @@ fn load_in_rounds(
         let (javac, reaching) = (javac.as_secs_f64(), reaching.as_secs_f64());
         let (classes, methods) = (reach.classes.len(), reach.methods.len());
         let memory = crate::timings::memory();
-        let received = session.received as f64 / 1e6;
-        eprintln!("timing: javac: {javac:.3} s, {} units, {received:.0} MB of trees{memory}", units.len());
+        let received = source.received as f64 / 1e6;
+        let taken = match source.taken {
+            Some(taken) => format!(" ({taken} of {round} rounds as an earlier load got them)"),
+            None => String::new(),
+        };
+        eprintln!(
+            "timing: javac: {javac:.3} s, {} units{taken}, {received:.0} MB of trees{memory}",
+            units.len()
+        );
         eprintln!(
             "timing: reach: {reaching:.3} s, {round} rounds ({} walks from the start again: {for_records} for records, \
              {stale} stale; {in_place} rounds added members to records walked before), {classes} classes and \
@@ -660,7 +836,7 @@ fn load_in_rounds(
             .map_err(|e| fail(format!("{}: {e}", Path::new(&path).display())))?;
         std::process::exit(0);
     }
-    Ok((units, reach, asked_in_rounds.map(Asked)))
+    Ok((units, reach, asked_in_rounds.map(Asked), Some(transcript)))
 }
 
 /// With `JAVA_TO_RUST_REACH_CHECK`, that a round reached what a walk from scratch over the same

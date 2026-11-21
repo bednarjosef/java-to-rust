@@ -1472,7 +1472,8 @@ public class Main {
 /// that cannot run is rejected and the program has Rust generics, cuts the reflection table by
 /// the facts that found them, and puts in it the classes that a lookup gets without a class
 /// literal (`o.getClass()`, `getSuperclass()`), as a translation does: the crate prints what
-/// Java prints, and the table keeps neither field of `Unrelated`, whose class is only named.
+/// Java prints, and the table keeps neither field of `Unrelated`, whose class is only named. The
+/// census taken again with those classes takes the units that javac gave the first.
 #[test]
 fn a_census_cuts_the_reflection_table_by_the_facts_of_lowering() {
     let Some(library) = std::env::var_os("JAVA_BASE_SOURCES").map(PathBuf::from) else {
@@ -1501,6 +1502,16 @@ fn a_census_cuts_the_reflection_table_by_the_facts_of_lowering() {
         "lowering did not find the methods that can run"
     );
     assert!(stderr.contains("reflection table: kept 2 of 4 members"), "{stderr}");
+    // The census taken again with the classes that the table missed asks javac for what the
+    // first one asked, round by round, and takes the units that javac gave it
+    // (`program::Earlier`).
+    let taken: Vec<(&str, &str)> = stderr
+        .lines()
+        .filter_map(|l| {
+            l.split_once(" rounds as an earlier load got them)")?.0.rsplit_once('(')?.1.split_once(" of ")
+        })
+        .collect();
+    assert!(!taken.is_empty() && taken.iter().all(|(taken, of)| taken == of), "{stderr}");
     let target = work.join("cargo");
     let built = Command::new("cargo")
         .args(["build", "-q", "--manifest-path"])
