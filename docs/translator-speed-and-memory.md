@@ -341,24 +341,28 @@ of that code, plus the few methods being worked on at a time. In order:
    the same facts during reachability, so that javac never reads those units, would shrink all
    three copies.
 
-Expected effect: several times less peak memory; for a project the size of the Minecraft server,
-the difference between the 20 to 40 GB estimated below and a few GB. That is an estimate until
-step 1 measures it.
+Expected effect: several times less peak memory. The Minecraft server's census peaks at 11.6 GB
+(below); these steps aim at a few GB.
 
-## At scale: the Minecraft server, roughly
+## At scale: the Minecraft server
 
-Assuming every feature it uses were supported, which is not yet the case. The dedicated server is
-several thousand classes, plus its libraries (Netty, Guava, fastutil, DataFixerUpper and more) and
-a large part of the JDK: likely 10,000 or more units and 100,000 to 200,000 reached methods, 15 to
-25 times TextAdventure.
+The census of the dedicated server and its libraries ([minecraft-server.md](minecraft-server.md)),
+measured on 2026-11-21 on main at ccd8091c with a release build of the translator: javac gives
+15,523 units (2,306 MB of trees), reachability finds 27,041 classes and 208,131 methods in 18
+rounds, and lowering makes 288,097 methods, of which 259,612 can run. The translator's peak is
+11.6 GB, javac's 2.6 GB.
 
-- **Today:** probably tens of minutes, and 20 to 40 GB of memory, which is the first wall.
-- **After steps 1 to 4:** a few minutes and under about 8 GB is a realistic target.
-- **rustc:** millions of lines of output; with step 7, roughly 10 to 30 minutes for a release build.
+| phase | time |
+|---|---:|
+| javac | 74 s |
+| reachability | 47 s |
+| lowering | 115 s, 75 s of it finding the methods that can run |
+| the analyses and the generator (`analyze`) | 186 s |
 
-These are estimates from four data points, not measurements. The first survey of the server
-([minecraft-server.md](minecraft-server.md)) confirms the wall: its census holds 5.5 GB after three
-rounds of loading (3,224 units, 636 MB of trees) and is still growing.
+In `analyze`, the analyses take 93 s (several run alongside each other) and the generator 66 s.
+The escape analysis (`analysis/escape.rs`) was the longest of the analyses, 7,967,485 solves of
+a method in 237 s, while it solved the methods of each component of the calls smallest first.
+Solved in rounds, it makes 531,725 solves in 20 s, and `analyze` went from 329 s to 186 s.
 
 ## The goal: javac, translated, in less memory
 

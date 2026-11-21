@@ -66,7 +66,8 @@
 //! their arguments, and what escapes or is returned. Solving a method again when a callee's
 //! summary changes then only unions bitsets, and a call's targets are one shared list whose
 //! combined summary is kept until one of them changes (a call on an `Object` may run thousands of
-//! methods). On javac the analysis takes about a second.
+//! methods). On javac the analysis makes 68,114 solves of its 40,080 methods, in 4 to 6 s on a
+//! busy machine; on the Minecraft server, 531,725 solves of its 290,794 methods take 20 s.
 //!
 //! **Loops.** The translation gives each `new` one slot, which a `new` in a loop reuses on every
 //! iteration. That is sound only if the object of the previous iteration can no longer be reached
@@ -248,8 +249,8 @@ pub fn stack_objects(class: &Class) -> StackObjects {
     // first, so that a change that reaches many of them (each of Gson's adapters' `write` calls
     // every adapter's) is taken by all before any of them is solved again. Smallest first alone
     // solved a small method again after each change of any other, 10,000 times for one `write`
-    // of the Minecraft server, ten times the solves in all. The least fixpoint is the same in any
-    // order.
+    // of the Minecraft server: 7,967,485 solves in all, in 237 s, where the rounds take 531,725
+    // in 20 s (on javac, 101,300 and 68,114). The least fixpoint is the same in any order.
     let callees: Vec<Vec<usize>> = {
         let mut callees = vec![Vec::new(); n];
         for (t, cs) in callers.iter().enumerate() {
