@@ -1038,3 +1038,53 @@ fn a_direct_call_of_a_shared_override_that_cannot_throw_names_its_plain_body_onc
     assert_contains(&rust, &["area__plain("]);
     assert_lacks(&rust, &["__plain__plain"]);
 }
+
+#[test]
+fn a_mutable_object_on_the_stack_is_read_and_written_plainly() {
+    // The positions' class is one that threads share (the worker reads the main thread's
+    // origin), but the walk's own positions never leave it: `move` on them is the confined form,
+    // whose reads and writes are plain, for the `new` and for the factory's object alike.
+    let rust = translate(
+        "class A {
+            static class Pos {
+                int x, y;
+                Pos(int x, int y) { this.x = x; this.y = y; }
+                int getX() { return x; }
+            }
+            static final class MutablePos extends Pos {
+                MutablePos(int x, int y) { super(x, y); }
+                MutablePos set(int x, int y) { this.x = x; this.y = y; return this; }
+                MutablePos move(int dx) { return set(x + dx, y); }
+            }
+            static Pos origin;
+            static MutablePos at(int x) { return new MutablePos(x, 0); }
+            static long walk(int[] cells) {
+                MutablePos p = new MutablePos(0, 0);
+                MutablePos q = at(1);
+                long sum = 0;
+                for (int i = 0; i < 8; i++) {
+                    sum += cells[p.x & 7] + cells[q.x & 7];
+                    p.move(1);
+                    q.move(2);
+                }
+                return sum;
+            }
+            public static void main(String[] args) throws Exception {
+                origin = new Pos(1, 2);
+                Thread t = new Thread(() -> System.out.println(walk(new int[8]) + origin.getX()));
+                t.start();
+                t.join();
+            }
+        }",
+    );
+    assert_contains(
+        &rust,
+        &[
+            "java::SharedField<i32>",
+            "_confined(&p, 1)",
+            "_confined(&q, 2)",
+            ".x.set_confined(x);",
+            ".x.get_confined().wrapping_add(dx)",
+        ],
+    );
+}

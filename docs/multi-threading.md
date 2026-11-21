@@ -185,20 +185,26 @@ that makes it (`StackObjects::objects` of the escape analysis, [collector.md](co
 method: handing an object to another thread is a way of leaving, since a thread reaches objects
 only through what the runtime is given when it starts and through fields and statics. Its fields
 then need none of the atomic actions above. A call on a receiver that always holds such an object
-(`analysis/escape/confined.rs`: a local whose every declaration and assignment is such a `new`,
-or in a lambda's method the field that captured one) calls the method's confined form,
+(`analysis/escape/confined.rs`: a local whose every declaration and assignment is such a `new`
+or a call of a factory that makes one in the method's slot, or in a lambda's method the field
+that captured one) calls the method's confined form,
 `<name>_confined`, which reads and writes the fields of `this` with `get_confined`,
 `set_confined` and the plain forms of the atomic updates (`compare_and_set_by_confined`,
 `get_and_update_confined`, ...), and calls the confined forms of what it calls on `this`: a
 counter `AtomicInteger` that a method keeps for a lambda it passes down sets it with a plain
-store, not an exchange, and its `incrementAndGet` is a plain increment, not a locked one. Only
-the methods that such calls may run and that do something atomic to `this` (an access of a
-`volatile` field, an update through `Unsafe`, or a call of such a method on `this`) get the
-form, since the other accesses are plain moves already, and only those that make no object (no
-lambda, whose `this` is another object). The decision is per object, but
-only for objects that stay in their method; an object that a field holds, such as a random
-generator that one thread's code reaches through a shared object, keeps the atomic accesses
-(section 7).
+store, not an exchange, and its `incrementAndGet` is a plain increment, not a locked one. The
+methods that such calls may run and that access a field of `this` that is not final (a
+`volatile` one among them), update one through `Unsafe`, or call such a method on `this` get the
+form, and only those that make no object (no lambda, whose `this` is another object). The
+acquire loads and release stores of a field that is not volatile are plain moves on x86, but
+LLVM keeps no such field in a register, forwards no store to the next load and merges no two
+loads: a mutable position moved along a loop (`pos.move(1, 0, 0)`) loaded its three coordinates
+and stored them back on each turn, where the confined form adds one in place. A final field
+alone gives a method no form: it is mostly fixed and read plainly (`fixed()`), and the rare one
+that is not (of a class whose constructor lets `this` escape) is left as it is. The decision is
+per object, but only for objects that stay in their method; an object that a field holds, such
+as a random generator that one thread's code reaches through a shared object, keeps the atomic
+accesses (section 7).
 
 ### 2.2 Arrays and builders
 
