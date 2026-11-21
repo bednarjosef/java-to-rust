@@ -745,7 +745,15 @@ to run.
   field initializers in order and the rest of its body; `this` can have left from the first of
   these that uses it as a value (passes, stores or captures it, or calls a method on it), from a
   superclass constructor or initializer that does, and from a `this(..)`. Until then no other
-  thread holds the object. A class built whole (section 1.4's second constructor form) is built
+  thread holds the object. The other fields that only constructors write are fixed too when the
+  class's objects are built alone: the escape analysis finds that no method that builds an
+  object of the class or of a subclass lets `this` escape (`analysis/escape.rs`, "Objects being
+  built"), so however a constructor uses `this`, calling a method on it or passing it to a
+  lambda that keeps it nowhere, no other code holds the object before its `new` is done. That
+  analysis runs alongside, and these fields join the fixed ones once it is done. In the
+  Minecraft server 19,372 of the 20,929 classes with fields are built alone, `BlockState` among
+  them, so `BlockStateBase`'s `isAir`, `canOcclude` and the other fields its constructor writes
+  after passing `this.asState()` to the block's properties are fixed. A class built whole (section 1.4's second constructor form) is built
   by the methods `construct<Name>` and `initializeFields` made of its constructors and field
   initializers, which count as its constructors here (`Class::constructs`), and a call of one on
   `this` lets it leave only where that class or a superclass does: the server's `StateHolder`
