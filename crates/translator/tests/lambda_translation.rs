@@ -267,6 +267,37 @@ fn a_closure_parameter_that_is_only_called_or_passed_on_is_lent() {
 }
 
 #[test]
+fn a_lambda_passed_to_a_lent_parameter_borrows_the_lent_closure_it_captures() {
+    let rust = translate(
+        "class A {
+            interface Sink { boolean take(int a, int b); }
+            static boolean each(int n, Sink s) {
+                for (int i = 0; i < n; i++) if (!s.take(i, n)) return false;
+                return true;
+            }
+            static boolean swapped(int n, Sink s) { return each(n, (a, b) -> s.take(b, a)); }
+            static Sink kept;
+            static boolean keeps(int n, Sink s) { kept = (a, b) -> s.take(a, a); return each(n, s); }
+            public static void main(String[] args) {
+                int limit = args.length + 3;
+                System.out.println(swapped(4, (a, b) -> b < limit) + \" \" + keeps(2, (a, b) -> a < 1));
+            }
+        }",
+    );
+    // The parameter that the lent lambda captures stays lent, and the lambda borrows it.
+    assert_contains(
+        &rust,
+        &[
+            "fn swapped(n: i32, s: &dyn Fn(i32, i32) -> bool) -> bool {",
+            "each(n, &(|a: i32, b: i32| -> bool { s(b, a) }))",
+            "swapped(4, &(|_a: i32, b: i32| -> bool { b < limit }))",
+        ],
+    );
+    // One that a stored lambda captures is kept in a handle.
+    assert_contains(&rust, &["fn keeps(n: i32, s: ASink) -> bool {"]);
+}
+
+#[test]
 fn a_lambda_reaches_the_enclosing_object_through_outer() {
     let rust = translate(
         "class A {

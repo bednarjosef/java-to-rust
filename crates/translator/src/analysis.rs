@@ -338,6 +338,10 @@ pub struct Facts {
     /// lends on: `&dyn Fn(..)`, or `Option<&dyn Fn(..)>` where they may be null, which the
     /// caller lends (see `closures::lent_closures`).
     pub lent_closures: FastSet<(usize, usize)>,
+    /// The captures, as (lambda class, field), of lambdas passed to lent closure parameters that
+    /// hold a lent closure themselves, which the closure on the stack borrows (see
+    /// `closures::lent_captures`).
+    pub lent_captures: FastSet<(usize, String)>,
     /// The `new`s and calls of factories whose objects never leave the method that creates
     /// them and, in a loop, can no longer be reached when the next iteration makes the next one:
     /// their objects may live in a slot on the method's stack (see `escape`). Empty when the
@@ -629,7 +633,13 @@ fn analyze_with(
                         borrowed_objects(class, &facts);
                     let borrowed =
                         facts.borrowed_objects.union(&facts.borrowed_optional_objects).copied().collect();
-                    facts.lent_closures = closures::lent_closures(class, &facts.closure_types, &borrowed);
+                    let non_null = |m: usize, name: &str| !nullable_var(&facts, m, name);
+                    let optional = &facts.borrowed_optional_objects;
+                    let lent =
+                        closures::lent_closures(class, &facts.closure_types, &borrowed, optional, &non_null);
+                    facts.lent_captures =
+                        closures::lent_captures(class, &facts.closure_types, &lent, optional);
+                    facts.lent_closures = lent;
                     facts.closure_locals =
                         closures::closure_locals(class, &facts.closure_types, &facts.lent_closures);
                 })
