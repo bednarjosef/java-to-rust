@@ -707,6 +707,54 @@ fn a_static_initializer_that_nothing_observes_runs_first_in_main() {
 }
 
 #[test]
+fn an_enum_whose_constructors_pass_on_another_enum_s_constant_runs_first_in_main() {
+    // `Token`'s short constructors pass the long one a constant of `Category`, which needs no
+    // initialization, as javac's `TokenKind` passes `Tag.DEFAULT`: `main` initializes `Token`
+    // first, and a read of its fields has no check. `Relay`'s passes a constant of `Noisy`, whose
+    // initialization prints, so `Relay` initializes at its first use.
+    let rust = translate(
+        "class A {
+            enum Category { BASIC, ERROR }
+            enum Token {
+                EOF, IDENT(\"id\"), DOT(\".\", Category.ERROR);
+                final String name;
+                final Category category;
+                Token() { this(null, Category.BASIC); }
+                Token(String name) { this(name, Category.BASIC); }
+                Token(String name, Category category) { this.name = name; this.category = category; }
+            }
+            enum Noisy {
+                LOUD(\"loud\"), QUIET(\"quiet\");
+                final String word;
+                Noisy(String word) { this.word = word; System.out.println(word); }
+            }
+            enum Relay {
+                NEAR, FAR;
+                final Noisy via;
+                Relay() { this(Noisy.LOUD); }
+                Relay(Noisy via) { this.via = via; }
+            }
+            static int sum;
+            static int score(Token t) { return t.category == Category.BASIC ? 1 : 2; }
+            static int hops(Relay r) { return r.via.word.length(); }
+            public static void main(String[] args) throws InterruptedException {
+                Thread t = new Thread(() -> sum = score(Token.DOT) + score(Token.EOF) + hops(Relay.FAR));
+                t.start();
+                t.join();
+                System.out.println(sum);
+            }
+        }",
+    );
+    let main = rust.find("fn main() {").unwrap_or_else(|| panic!("no main in:\n{rust}"));
+    let started = main + rust[main..].find("let _main = java::main_thread();").expect("main's thread");
+    let before_main = &rust[main..started];
+    assert!(before_main.contains("init_a_token();") && !before_main.contains("init_a_relay"), "{rust}");
+    let score = rust.find("fn score(").unwrap_or_else(|| panic!("no score in:\n{rust}"));
+    let score = &rust[score..score + rust[score..].find("\n}\n").expect("the end of score")];
+    assert!(!score.contains("init_a_token"), "{rust}");
+}
+
+#[test]
 fn a_constructor_that_starts_a_thread_without_letting_this_leave_keeps_its_fields_fixed() {
     let rust = translate(
         "class A {
