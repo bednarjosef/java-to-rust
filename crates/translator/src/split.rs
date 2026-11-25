@@ -63,6 +63,26 @@ const CODEGEN_UNIT: usize = 512 * 1024;
 /// keeps those pointers in its file, read only where used.
 pub const CARGO_CONFIG: &str = "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\", \"-C\", \"llvm-args=-align-loops=64\", \"-C\", \"relocation-model=static\"]\n";
 
+/// The runtime crate that a written translation depends on by path: `JAVA_TO_RUST_RUNTIME` when
+/// it is set, otherwise `crates/runtime` next to the source the translator was built from. The
+/// translator checks it before it starts (`main.rs`), so that a long translation does not fail
+/// at its last step because that source has moved.
+pub fn runtime_dir() -> Result<PathBuf, String> {
+    let (dir, from) = match std::env::var_os("JAVA_TO_RUST_RUNTIME") {
+        Some(dir) => (PathBuf::from(dir), "JAVA_TO_RUST_RUNTIME"),
+        None => (Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime"), "the translator's build"),
+    };
+    match dir.canonicalize() {
+        Ok(dir) if dir.join("Cargo.toml").is_file() => Ok(dir),
+        _ => Err(format!(
+            "the runtime crate is not at {} (from {from}); a written translation depends on it. \
+             Rebuild the translator where its source is, or set JAVA_TO_RUST_RUNTIME to the \
+             crates/runtime directory",
+            dir.display()
+        )),
+    }
+}
+
 /// The crates of a split program, each as its files under `src/`.
 pub struct Workspace {
     pub header: Vec<SourceFile>,
@@ -80,7 +100,7 @@ impl Workspace {
     pub fn write(&self, dir: &Path, name: &str) -> std::io::Result<()> {
         let workspace = self;
         let name = name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-");
-        let runtime: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime").canonicalize()?;
+        let runtime = runtime_dir().map_err(std::io::Error::other)?;
         let runtime = format!("java-runtime = {{ path = {:?} }}\n", runtime.display().to_string());
         let bodies: Vec<&String> = workspace.bodies.iter().map(|(body, _)| body).collect();
         let members: Vec<String> = ["header".to_string()]

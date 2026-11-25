@@ -4,7 +4,7 @@
 //! written with `-o`, it is one file.
 
 use java_to_rust::output::{Layout, SourceFile};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
@@ -49,6 +49,10 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
     if let Some(at) = args.iter().position(|a| a == "--timings") {
         args.remove(at);
         java_to_rust::timings::enable();
+    }
+    // A crate is written last, after all the work: find the runtime crate it needs first.
+    if args.iter().any(|a| a == "--crate") {
+        java_to_rust::split::runtime_dir()?;
     }
     if args.iter().any(|a| {
         matches!(
@@ -312,7 +316,7 @@ fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result
         .unwrap_or("translated")
         .to_lowercase()
         .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
-    let runtime: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime").canonicalize()?;
+    let runtime = java_to_rust::split::runtime_dir().map_err(std::io::Error::other)?;
     std::fs::create_dir_all(dir.join("src"))?;
     std::fs::write(
         dir.join("Cargo.toml"),
