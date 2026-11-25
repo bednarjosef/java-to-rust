@@ -60,8 +60,9 @@ the work again and stores the results anew; `CORPUS_JAVA_FRESH=1` reruns only th
 `benchmarks/` holds small programs (sieve, n-body, Mandelbrot, sorting, binary trees, string
 building, an interpreter, ...). `python3 scripts/benchmark.py [--runs N] [Program ...]` checks
 that each translation prints what Java prints, then times both sides as the median of N
-wall-clock runs, JVM start-up included. [docs/performance.md](performance.md) has the
-results and the causes of the slow cases. `scripts/clippy-corpus.sh` counts the clippy warnings
+wall-clock runs, JVM start-up included. [performance.md](performance.md) has the
+results and the causes of the slow cases. `python3 scripts/performance-charts.py` draws the
+README's charts into `docs/images/` from the numbers in those tables, copied into the script. `scripts/clippy-corpus.sh` counts the clippy warnings
 in the generated code of the corpus.
 
 ## Other scripts

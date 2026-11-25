@@ -62,6 +62,32 @@ fn main() {
 What Rust lacks (Java's number formatting, strings, threads and monitors, a garbage collector,
 the JDK's native methods) comes from the runtime crate in `crates/runtime`.
 
+## Performance
+
+Each bar shows how many times better the translation is than Java on the same machine: to the
+right (blue) it wins, to the left (orange) it loses. Small programs win clearly, partly because
+there is no JVM to start. On long-running work the JVM's just-in-time compiler is still ahead:
+the translated javac is slower on large inputs, and the translated Minecraft server runs at
+about 85% of the JVM's tick rate while starting 2.8 times faster in a third of the memory.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/benchmarks-dark.svg">
+  <img alt="Benchmarks: times faster than Java" src="docs/images/benchmarks-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/memory-dark.svg">
+  <img alt="Benchmarks: times less memory than Java" src="docs/images/memory-light.svg">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/large-programs-dark.svg">
+  <img alt="javac and the Minecraft server: times better than Java" src="docs/images/large-programs-light.svg">
+</picture>
+
+The numbers, how they were measured and what makes the slow cases slow are in
+[docs/performance.md](docs/performance.md).
+
 ## Build and run
 
 You need a Rust toolchain and a JDK (21 or newer) with `javac` and `java` on `PATH`.
