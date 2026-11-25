@@ -53,7 +53,7 @@ their own branches at the same time; the lead merges the branches.
   Edit shared files (`ast.rs`, `lower.rs`, `codegen.rs` and `codegen/*.rs`, `analysis/ranges.rs`) only by adding
   variants, match arms and small calls into your files. Never reformat or reorganize code you do
   not need to change. Keep each source file under 1000 lines.
-- Never edit `tools/`, `scripts/`, `.github/`, or another feature's corpus files.
+- Never edit `tools/`, `scripts/`, or another feature's corpus files.
 
 ## Working rules
 - Your shell starts in your worktree root: run `git`, `cargo` and `scripts/check.sh` there,

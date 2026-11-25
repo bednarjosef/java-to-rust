@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fails if committed files or commit identities carry personal data: absolute home paths, or any
-# email address other than GitHub noreply ones. Run locally before pushing; CI runs it too.
+# email address other than GitHub noreply ones. Run it before pushing.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 rc=0

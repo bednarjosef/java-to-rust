@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Everything CI checks, in its order: formatting, clippy with warnings as errors, all tests; with
+# The full local check, in order: formatting, clippy with warnings as errors, all tests; with
 # JAVA_BASE_SOURCES set, also that the translator's Java holds no copy of the JDK's.
 # Prints only what fails. On success with a clean working tree, records the commit in
 # target/check-passed (the worker Stop hook reads it).
