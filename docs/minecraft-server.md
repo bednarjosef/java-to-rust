@@ -60,8 +60,8 @@ and 2,411 fastutil files. fastutil is then only the few dozen classes the server
 
 ### Census checkpoints
 
-javac, reach, lowering and the walk of the code that can run take about a quarter of an hour of
-a census of the server. With `JAVA_TO_RUST_CENSUS_CHECKPOINT=FILE`, the translator saves the
+javac, reach and lowering take about three minutes of a census of the server (56 s, 23 s and
+110 s on 2026-11-21, of a census of six minutes). With `JAVA_TO_RUST_CENSUS_CHECKPOINT=FILE`, the translator saves the
 lowered program to `FILE` (`program/checkpoint.rs`) when the file does not exist, and when it
 does, it reads the program from it and starts the census at the analyses. A census taken from a
 checkpoint is the same as the full one (checked on javac's census and translation). A checkpoint

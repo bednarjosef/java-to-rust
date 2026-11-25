@@ -13,7 +13,7 @@ nothing per run, gives the same output every time, and is checked against the JV
 | program | Java in | Rust out | translation | Rust build |
 |---|---:|---:|---:|---:|
 | javac, the Java compiler | 178,000 lines, plus the JDK code it uses | 951,000 lines | 65 s | under 3 min |
-| Minecraft server 26.3 | 547,000 lines, plus its libraries and the JDK | 7.4 million lines | about 7 min | 29 min |
+| Minecraft server 26.3 | 547,000 lines, plus its libraries and the JDK | 7.3 million lines | 6 min | 36 min |
 
 Times on a 16-core laptop (Ryzen AI 7 350). The Rust build is a quick release build for javac
 and an optimized release build split into 14 crates for the server.
