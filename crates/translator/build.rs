@@ -86,6 +86,57 @@ fn main() {
     assert!(charsets.status.success(), "Charsets failed: {}", String::from_utf8_lossy(&charsets.stderr));
     std::fs::write(std::path::Path::new(&out).join("charsets.json"), charsets.stdout)
         .expect("the build directory is writable");
+    println!("cargo:rerun-if-changed=java/overlay");
+    println!("cargo:rerun-if-changed=java/patches");
+    write_embedded(std::path::Path::new(&out));
+}
+
+/// Writes `embedded.rs` into the build directory: the compiled classes of `java/` and the files
+/// of `java/overlay` and `java/patches`, each by its path under its directory, with a key of all
+/// their bytes (see `embedded.rs` in `src/`), so that the translator's binary carries them and
+/// runs wherever it is copied or installed.
+fn write_embedded(out: &std::path::Path) {
+    let manifest = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets it"));
+    let mut key: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut text = String::new();
+    for (name, dir, keep) in [
+        ("CLASSES", out.to_path_buf(), "class"),
+        ("OVERLAY", manifest.join("java/overlay"), "java"),
+        ("PATCHES", manifest.join("java/patches"), "java"),
+    ] {
+        let mut files = Vec::new();
+        list(&dir, &dir, keep, &mut files);
+        files.sort();
+        text.push_str(&format!("pub static {name}: &[(&str, &[u8])] = &[\n"));
+        for relative in &files {
+            let path = dir.join(relative);
+            for byte in relative.bytes().chain(std::fs::read(&path).expect("a listed file reads")) {
+                key = (key ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+            text.push_str(&format!(
+                "    ({relative:?}, include_bytes!({:?})),\n",
+                path.display().to_string()
+            ));
+        }
+        text.push_str("];\n");
+    }
+    text.push_str(&format!("pub const KEY: &str = \"{key:016x}\";\n"));
+    std::fs::write(out.join("embedded.rs"), text).expect("the build directory is writable");
+}
+
+/// The files under `dir` whose extension is `keep`, as paths relative to `root` with `/`.
+fn list(root: &std::path::Path, dir: &std::path::Path, keep: &str, files: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).expect("a directory of the build reads").flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            list(root, &path, keep, files);
+        } else if path.extension().is_some_and(|e| e == keep) {
+            let relative = path.strip_prefix(root).expect("under its root");
+            files.push(
+                relative.components().map(|c| c.as_os_str().to_string_lossy()).collect::<Vec<_>>().join("/"),
+            );
+        }
+    }
 }
 
 /// Makes Cargo run this script again when the `java` that `PATH` finds (through its links) or

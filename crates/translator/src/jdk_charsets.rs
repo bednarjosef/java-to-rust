@@ -69,8 +69,12 @@ pub fn charsets() -> &'static [JdkCharset] {
 /// The charsets of the JDK on the path, which `java/Charsets.java` prints; `None` when it cannot
 /// be run.
 fn asked_now() -> Option<Vec<JdkCharset>> {
-    let output =
-        std::process::Command::new("java").args(["-cp", env!("OUT_DIR"), "Charsets"]).output().ok()?;
+    let output = std::process::Command::new("java")
+        .arg("-cp")
+        .arg(crate::embedded::classes())
+        .arg("Charsets")
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }

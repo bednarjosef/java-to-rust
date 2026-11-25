@@ -3,8 +3,9 @@ resolver = "3"
 members = ["crates/translator", "crates/runtime"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
-license = "GPL-3.0-or-later"
+repository = "https://github.com/bednarjosef/java-to-rust"
 
 # Dependencies (serde_json and the rest) are compiled once, so optimizing them costs a clean
 # build some seconds and an incremental build of the translator nothing.

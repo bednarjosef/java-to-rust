@@ -55,7 +55,7 @@ fn java(main: &str, options: &[&str], run: Run) -> Command {
     for package in JAVAC_PACKAGES {
         command.args(["--add-exports", &format!("jdk.compiler/com.sun.tools.javac.{package}=ALL-UNNAMED")]);
     }
-    command.args(options).args(["-cp", env!("OUT_DIR"), main]);
+    command.args(options).arg("-cp").arg(crate::embedded::classes()).arg(main);
     command
 }
 

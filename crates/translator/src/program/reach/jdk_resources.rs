@@ -195,7 +195,9 @@ pub fn read(names: &BTreeSet<String>) -> BTreeMap<String, Vec<u8>> {
         return BTreeMap::new();
     }
     let output = std::process::Command::new("java")
-        .args(["-cp", env!("OUT_DIR"), "JdkResources"])
+        .arg("-cp")
+        .arg(crate::embedded::classes())
+        .arg("JdkResources")
         .args(names)
         .output();
     let Some(output) = output.ok().filter(|o| o.status.success()) else { return BTreeMap::new() };

@@ -38,7 +38,7 @@
 
 use crate::output::{ModuleTree, SourceFile};
 use proc_macro2::Span;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use syn::spanned::Spanned;
 
 /// About how much moved code (`Piece::size`) a module of a body crate holds before the rest goes
@@ -63,24 +63,50 @@ const CODEGEN_UNIT: usize = 512 * 1024;
 /// keeps those pointers in its file, read only where used.
 pub const CARGO_CONFIG: &str = "[build]\nrustflags = [\"-C\", \"target-cpu=x86-64-v3\", \"-C\", \"llvm-args=-align-loops=64\", \"-C\", \"relocation-model=static\"]\n";
 
-/// The runtime crate that a written translation depends on by path: `JAVA_TO_RUST_RUNTIME` when
-/// it is set, otherwise `crates/runtime` next to the source the translator was built from. The
-/// translator checks it before it starts (`main.rs`), so that a long translation does not fail
-/// at its last step because that source has moved.
-pub fn runtime_dir() -> Result<PathBuf, String> {
-    let (dir, from) = match std::env::var_os("JAVA_TO_RUST_RUNTIME") {
-        Some(dir) => (PathBuf::from(dir), "JAVA_TO_RUST_RUNTIME"),
-        None => (Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime"), "the translator's build"),
+/// Whether the runtime crate of this version is on crates.io, so that a written translation can
+/// depend on it by version when it has no checkout of the runtime to depend on by path.
+const RUNTIME_PUBLISHED: bool = false;
+
+/// The line of a written translation's `Cargo.toml` that names the runtime crate, as
+/// `java_runtime`: by path to `JAVA_TO_RUST_RUNTIME` when it is set; by path to `crates/runtime`
+/// next to the source the translator was built from while that is there, so that a translator
+/// built from a checkout writes crates that build against that checkout's runtime; and otherwise,
+/// once it is published (`RUNTIME_PUBLISHED`), the crates.io crate of the translator's own
+/// version. Without any of those it is an error, which the translator reports before it starts
+/// (`main.rs`), not after a long translation.
+pub fn runtime_dependency() -> Result<String, String> {
+    let by_path = |dir: &Path| {
+        let dir = dir.canonicalize().ok().filter(|d| d.join("Cargo.toml").is_file())?;
+        Some(format!(
+            "java-runtime = {{ package = \"java-to-rust-runtime\", path = {:?} }}\n",
+            dir.display().to_string()
+        ))
     };
-    match dir.canonicalize() {
-        Ok(dir) if dir.join("Cargo.toml").is_file() => Ok(dir),
-        _ => Err(format!(
-            "the runtime crate is not at {} (from {from}); a written translation depends on it. \
-             Rebuild the translator where its source is, or set JAVA_TO_RUST_RUNTIME to the \
-             crates/runtime directory",
-            dir.display()
-        )),
+    if let Some(dir) = std::env::var_os("JAVA_TO_RUST_RUNTIME") {
+        return by_path(Path::new(&dir)).ok_or_else(|| {
+            format!(
+                "JAVA_TO_RUST_RUNTIME is {}, which holds no Cargo.toml: it must name the runtime \
+                 crate's directory (crates/runtime in the repository)",
+                Path::new(&dir).display()
+            )
+        });
     }
+    let built_from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../runtime");
+    if let Some(line) = by_path(&built_from) {
+        return Ok(line);
+    }
+    if RUNTIME_PUBLISHED {
+        return Ok(format!(
+            "java-runtime = {{ package = \"java-to-rust-runtime\", version = \"={}\" }}\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
+    Err(format!(
+        "the runtime crate is not at {}, where the translator was built from; a written \
+         translation depends on it. Set JAVA_TO_RUST_RUNTIME to the crates/runtime directory of a \
+         checkout of java-to-rust",
+        built_from.display()
+    ))
 }
 
 /// The crates of a split program, each as its files under `src/`.
@@ -100,8 +126,7 @@ impl Workspace {
     pub fn write(&self, dir: &Path, name: &str) -> std::io::Result<()> {
         let workspace = self;
         let name = name.to_lowercase().replace(|c: char| !c.is_ascii_alphanumeric(), "-");
-        let runtime = runtime_dir().map_err(std::io::Error::other)?;
-        let runtime = format!("java-runtime = {{ path = {:?} }}\n", runtime.display().to_string());
+        let runtime = runtime_dependency().map_err(std::io::Error::other)?;
         let bodies: Vec<&String> = workspace.bodies.iter().map(|(body, _)| body).collect();
         let members: Vec<String> = ["header".to_string()]
             .into_iter()

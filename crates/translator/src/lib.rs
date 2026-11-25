@@ -6,8 +6,10 @@ pub mod analysis;
 pub mod ast;
 pub mod check_cache;
 pub mod codegen;
+pub mod embedded;
 pub mod javac;
 pub mod jdk_charsets;
+pub mod jdk_sources;
 pub mod lower;
 pub mod output;
 pub mod program;
@@ -22,7 +24,7 @@ pub use program::{
 };
 
 /// Translates one Java source file into the source of a Rust program that uses the
-/// `java-runtime` crate.
+/// `java-to-rust-runtime` crate.
 pub fn translate(java: &str) -> Result<String, Error> {
     let (rust, notes) = translate_with_notes(java)?;
     for note in notes {

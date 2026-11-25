@@ -6,7 +6,7 @@ publish = false
 description = "Differential check of the runtime's float and double printing against Java"
 
 [dependencies]
-java-runtime = { path = "../../../crates/runtime" }
+java-runtime = { package = "java-to-rust-runtime", path = "../../../crates/runtime" }
 
 # Not part of the translator's workspace: it has its own lock file and target directory.
 [workspace]

@@ -2,7 +2,7 @@
 //! included, for objects that die young and for objects of which some live on, which leaves
 //! the heap's blocks with short holes, as a server's tick does.
 //!
-//!     cargo run --release -p java-runtime --example allocation [millions]
+//!     cargo run --release -p java-to-rust-runtime --example allocation [millions]
 //!
 //! Each line is one pattern: the calling thread's instructions and cycles per allocation (the
 //! fewest of 5 rounds, which vary less than times on a busy machine), and the collections.

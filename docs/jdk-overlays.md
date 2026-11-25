@@ -51,7 +51,9 @@ From the lightest to the heaviest:
 ### How a patch is applied
 
 The translator runs javac in a JVM of its own (`java/JavaTree.java`). With libraries, it passes
-`--patches crates/translator/java/patches`, and `java/JdkPatch.java` sits between javac and the
+`--patches` with the patches' directory (the translator's binary carries `java/patches` and
+`java/overlay` and writes them to `~/.cache/java-to-rust/files` on first use, see
+`embedded.rs`), and `java/JdkPatch.java` sits between javac and the
 files: when javac reads a source file of the source path, such as the JDK's
 `java/io/PrintStream.java`, and a patch of that path exists, javac gets the JDK's text with the
 patch applied. Nothing is written to disk, and the JDK's sources are only read. The patched unit
@@ -142,7 +144,8 @@ skipped. The error names the patch's file and line, and the JDK's file:
   class are those of that text.
 - `cargo test --test jdk_patches` applies every patch to the JDK's sources when
   `JAVA_BASE_SOURCES` is set (and the JDK's other modules next to it), and checks the patch mechanism itself either way. By hand:
-  `java -cp <build dir>/out JdkPatch crates/translator/java/patches $JAVA_BASE_SOURCES --out DIR`.
+  `java -cp ~/.cache/java-to-rust/files/*/classes JdkPatch crates/translator/java/patches $JAVA_BASE_SOURCES --out DIR`
+  (after any translation has written the classes there).
 - A patch can patch any library's classes, not only the JDK's: it applies to the file of its path
   wherever javac's source path has it.
 

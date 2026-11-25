@@ -1,15 +1,17 @@
 [package]
 name = "java-to-rust"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later"
+repository.workspace = true
+readme = "../../README.md"
 description = "Translates Java source code into Rust source code"
 
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 bincode = "1.3.3"
 serde_json = { version = "1", features = ["unbounded_depth"] }
-java-runtime = { path = "../runtime" }
+java-runtime = { package = "java-to-rust-runtime", path = "../runtime", version = "0.1.0" }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "2", default-features = false, features = ["full", "parsing", "printing"] }
 mimalloc = { version = "0.1.52", default-features = false }

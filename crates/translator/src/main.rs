@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
-       java-to-rust [--timings] --main <package.Class> [--source <root>]... [--library <root>]... [--keep-going]
+       java-to-rust [--timings] --main <package.Class> [--source <root>]... [--jdk] [--library <root>]... [--keep-going]
                     [--named-locals] [--approximate-messages] [--add-exports <module>/<package>=<to>]...
                     [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
                      | --survey [--survey-json <file>]
@@ -50,9 +50,9 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
         args.remove(at);
         java_to_rust::timings::enable();
     }
-    // A crate is written last, after all the work: find the runtime crate it needs first.
+    // A crate is written last, after all the work: check the runtime crate it names first.
     if args.iter().any(|a| a == "--crate") {
-        java_to_rust::split::runtime_dir()?;
+        java_to_rust::split::runtime_dependency()?;
     }
     if args.iter().any(|a| {
         matches!(
@@ -60,6 +60,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
             "--main"
                 | "--source"
                 | "--library"
+                | "--jdk"
                 | "--survey"
                 | "--survey-json"
                 | "--census"
@@ -119,6 +120,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
     let mut crates = None;
     let mut save_tree = None;
     let mut from_tree = None;
+    let mut jdk = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -126,6 +128,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--main" => program.main = value()?,
             "--source" => program.sources.push(value()?.into()),
             "--library" => program.libraries.push(value()?.into()),
+            "--jdk" => jdk = true,
             "-o" | "--crate" => output = Some((arg.as_str(), value()?)),
             "--survey" => survey = true,
             "--survey-json" => {
@@ -162,6 +165,17 @@ fn run_program(args: &[String]) -> Result<(), String> {
     }
     if program.main.is_empty() {
         return Err(format!("--main is required for a program\n{USAGE}"));
+    }
+    if jdk {
+        let roots: Vec<_> = program.sources.iter().chain(&program.libraries).cloned().collect();
+        let modules = java_to_rust::timings::phase("jdk sources", || {
+            java_to_rust::jdk_sources::libraries(&roots, &program.files)
+        })?;
+        if java_to_rust::timings::enabled() {
+            let names: Vec<_> = modules.iter().filter_map(|m| m.file_name()?.to_str()).collect();
+            eprintln!("timing: jdk modules: {}", names.join(" "));
+        }
+        program.libraries.extend(modules);
     }
     // A census's translation saved with `--save-tree`, written again without taking the census:
     // for a change to how a translation is written or split.
@@ -316,16 +330,15 @@ fn write_crate(dir: &Path, input: &str, files: &[SourceFile]) -> std::io::Result
         .unwrap_or("translated")
         .to_lowercase()
         .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
-    let runtime = java_to_rust::split::runtime_dir().map_err(std::io::Error::other)?;
+    let runtime = java_to_rust::split::runtime_dependency().map_err(std::io::Error::other)?;
     std::fs::create_dir_all(dir.join("src"))?;
     std::fs::write(
         dir.join("Cargo.toml"),
         format!(
             "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
-             [dependencies]\njava-runtime = {{ path = {:?} }}\n\n\
+             [dependencies]\n{runtime}\n\
              [profile.dev]\ndebug = \"line-tables-only\"\nincremental = false\n\n\
-             [profile.release]\nlto = \"fat\"\n\n[workspace]\n",
-            runtime.display().to_string()
+             [profile.release]\nlto = \"fat\"\n\n[workspace]\n"
         ),
     )?;
     if cfg!(target_arch = "x86_64") {

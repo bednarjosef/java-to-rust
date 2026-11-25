@@ -43,11 +43,11 @@ pub(super) fn run_uncached(command: &mut Command, input: &str) -> std::io::Resul
     Ok(Ran { success: output.status.success(), stdout: output.stdout, stderr: output.stderr })
 }
 
-/// The key of a run: the Java version, the classes in the build directory (which the command
+/// The key of a run: the Java version, the classes of `java/` (`embedded::classes`, which the command
 /// names by its path, the same for every source), the program and arguments of the command, its
 /// environment, and the input. None if a class cannot be read.
 fn key(command: &Command, input: &str) -> Option<String> {
-    let classes = env!("OUT_DIR");
+    let classes = crate::embedded::classes().as_os_str();
     let mut fingerprint = Fingerprint::new();
     fingerprint.field(b"javac run");
     fingerprint.field(check_cache::java_version().as_bytes());
@@ -64,13 +64,13 @@ fn key(command: &Command, input: &str) -> Option<String> {
     Some(fingerprint.key())
 }
 
-/// A hash of the files in the build directory: the classes of `java/` and the trees `build.rs`
-/// printed. Computed once per process.
+/// A hash of the classes of `java/` that the translator carries (`embedded::classes`). Computed
+/// once per process.
 fn classes_key() -> Option<&'static str> {
     static KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     KEY.get_or_init(|| {
         let mut fingerprint = Fingerprint::new();
-        fingerprint.tree(std::path::Path::new(env!("OUT_DIR")), &[])?;
+        fingerprint.tree(crate::embedded::classes(), &[])?;
         Some(fingerprint.key())
     })
     .as_deref()

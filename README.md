@@ -113,12 +113,17 @@ cargo run --release -p java-to-rust -- Program.java --crate out/ # write a Cargo
 cd out && cargo run --release
 ```
 
-Larger programs are translated whole, together with the JDK's own library sources:
+Larger programs are translated whole, together with the JDK's own library sources. `--jdk`
+finds them in your JDK (its `lib/src.zip`) and adds only the modules the program uses; your
+libraries' sources go in with `--library`:
 
 ```bash
-cargo run --release -p java-to-rust -- --main com.example.Main --source src/ \
-    --library jdk-src/java.base --crate out/
+cargo run --release -p java-to-rust -- --main com.example.Main --source src/ --jdk --crate out/
 ```
+
+The translator's binary is self-contained: `cargo install --path crates/translator` puts it on
+your `PATH`, and it runs from anywhere while this checkout stays where it is (translated projects
+build against its `crates/runtime`).
 
 All options are in [docs/usage.md](docs/usage.md).
 
@@ -147,4 +152,9 @@ Everything else is in [docs/](docs/).
 
 ## License
 
-GPL-3.0-or-later; see [LICENSE](LICENSE).
+The translator is GPL-3.0-or-later ([LICENSE](LICENSE)). Everything it puts into a translated
+program is MIT OR Apache-2.0: the runtime crate ([crates/runtime](crates/runtime)) and the
+translator's own Java that gets translated along with the program
+([crates/translator/java/LICENSE.md](crates/translator/java/LICENSE.md)). So translating a program
+adds no license terms of the translator's to it. A whole-program translation also contains the
+JDK's code, which keeps the JDK's license (GPL-2.0 with the Classpath Exception).

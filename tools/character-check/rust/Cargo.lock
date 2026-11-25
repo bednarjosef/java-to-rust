@@ -6,9 +6,9 @@ version = 4
 name = "character-check"
 version = "0.0.0"
 dependencies = [
- "java-runtime",
+ "java-to-rust-runtime",
 ]
 
 [[package]]
-name = "java-runtime"
+name = "java-to-rust-runtime"
 version = "0.1.0"

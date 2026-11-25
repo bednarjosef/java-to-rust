@@ -155,7 +155,7 @@ fn every_patch_applies_to_the_jdk() {
         others.sort();
         roots.extend(others);
     }
-    let patches = Path::new(java_to_rust::program::PATCHES);
+    let patches = java_to_rust::embedded::patches();
     if let Err(error) = check_patches(patches, &roots, None) {
         panic!("{error}");
     }

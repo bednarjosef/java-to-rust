@@ -8,4 +8,4 @@ publish = false
 [workspace]
 
 [dependencies]
-java-runtime = { path = "../../../crates/runtime" }
+java-runtime = { package = "java-to-rust-runtime", path = "../../../crates/runtime" }

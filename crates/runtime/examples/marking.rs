@@ -2,7 +2,7 @@
 //! many tables of entries whose values point to each other at random, beside pointer-free
 //! arrays, while short-lived garbage is churned.
 //!
-//!     cargo run --release -p java-runtime --example marking [alive-mb] [collections]
+//!     cargo run --release -p java-to-rust-runtime --example marking [alive-mb] [collections]
 //!
 //! It prints the median and fastest pause of the collections it runs (`gc::collect_now`, each a
 //! whole collection: stopping, marking, sweeping), the processor time they took, all markers',

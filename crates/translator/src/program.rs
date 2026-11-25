@@ -110,13 +110,13 @@ fn fail(message: String) -> ProgramError {
     ProgramError { file: None, error: Error { pos: Pos::default(), message } }
 }
 
-/// Translates a whole program into the source of one Rust program that uses the `java-runtime`
+/// Translates a whole program into the source of one Rust program that uses the `java-to-rust-runtime`
 /// crate, as one file.
 pub fn translate_program(program: &Program) -> Result<String, ProgramError> {
     translate_program_modules(program).map(|tree| tree.one_file())
 }
 
-/// Translates a whole program into the modules of a Rust program that uses the `java-runtime`
+/// Translates a whole program into the modules of a Rust program that uses the `java-to-rust-runtime`
 /// crate, one per package, for a layout (`output::Layout`) to write as files.
 ///
 /// An `Arrays.sort` or `Arrays.fill` of a `String[]` that is an `Object[]` calls the JDK's method
@@ -815,7 +815,7 @@ fn load_in_rounds(
         std::process::exit(0);
     }
     let roots = program.sources.iter().chain(&program.libraries);
-    reach.modules = modules::contents(roots, Some(std::path::Path::new(OVERLAY)));
+    reach.modules = modules::contents(roots, Some(crate::embedded::overlay()));
     reach.jdk_resources = reach::read_jdk_resources(&reach.jdk_resource_names());
     reach.added_exports = program.add_exports.clone();
     // Whether each unit's last copy is the unit completed now: whether what completing it writes
@@ -1219,26 +1219,20 @@ fn javac_tree(program: &Program, files: &[PathBuf]) -> Result<Value, ProgramErro
 }
 
 /// The roots that javac loads classes from: the program's, then with libraries the translator's
-/// own classes that replace or add to the JDK's (`OVERLAY`), then the libraries'.
+/// own classes that replace or add to the JDK's, then the libraries'. The translator's classes
+/// (`embedded::overlay`, from `java/overlay`) are those the JDK does not have: the objects that
+/// `System.in`, `System.out` and `System.err` are (see docs/natives-and-input.md), and the classes
+/// that calls of the JDK are redirected to (`reach::REDIRECTED_CALLS`). See docs/jdk-overlays.md.
 fn sourcepath(program: &Program) -> Vec<PathBuf> {
-    let overlay = (!program.libraries.is_empty()).then(|| PathBuf::from(OVERLAY));
+    let overlay = (!program.libraries.is_empty()).then(|| crate::embedded::overlay().to_path_buf());
     program.sources.iter().cloned().chain(overlay).chain(program.libraries.iter().cloned()).collect()
 }
-
-/// The translator's own classes for a translation with the JDK's sources, which the JDK does not
-/// have, ahead of the JDK's on the source path: the objects that `System.in`, `System.out` and
-/// `System.err` are (see docs/natives-and-input.md), and the classes that calls of the JDK are
-/// redirected to (`reach::REDIRECTED_CALLS`). See docs/jdk-overlays.md.
-const OVERLAY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/overlay");
 
 /// The translator's patches of the JDK's classes, which javac applies to the JDK's files as it
 /// reads them (`java/JdkPatch.java`), with libraries.
 fn patches(program: &Program) -> Option<&'static Path> {
-    (!program.libraries.is_empty()).then(|| Path::new(PATCHES))
+    (!program.libraries.is_empty()).then(crate::embedded::patches)
 }
-
-/// See `patches`, and docs/jdk-overlays.md.
-pub const PATCHES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/java/patches");
 
 /// The program's own files: the given files and every `.java` file under the source roots, sorted
 /// and without duplicates. A root's `module-info.java` is not one: javac compiles every root as

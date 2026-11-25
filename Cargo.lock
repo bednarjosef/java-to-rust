@@ -34,15 +34,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "java-runtime"
-version = "0.1.0"
-
-[[package]]
 name = "java-to-rust"
 version = "0.1.0"
 dependencies = [
  "bincode",
- "java-runtime",
+ "java-to-rust-runtime",
  "mimalloc",
  "proc-macro2",
  "serde",
@@ -50,6 +46,10 @@ dependencies = [
  "syn 2.0.119",
  "thin-vec",
 ]
+
+[[package]]
+name = "java-to-rust-runtime"
+version = "0.1.0"
 
 [[package]]
 name = "libmimalloc-sys"

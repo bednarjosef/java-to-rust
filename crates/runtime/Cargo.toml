@@ -1,6 +1,11 @@
 [package]
-name = "java-runtime"
-version = "0.1.0"
+name = "java-to-rust-runtime"
+version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
 description = "Java semantics for Rust code produced by java-to-rust"
+readme = "README.md"
+
+[lib]
+name = "java_runtime"

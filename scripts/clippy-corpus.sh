@@ -23,7 +23,7 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-java-runtime = { path = "$runtime" }
+java-runtime = { package = "java-to-rust-runtime", path = "$runtime" }
 
 [workspace]
 EOF

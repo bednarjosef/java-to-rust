@@ -644,7 +644,7 @@ trial() {
   # it, the longest step of a release build. When a group passes the memory cap and the build is killed without a
   # compile error, the rest build one crate at a time, past the crates already built.
   local -a build=(cargo build -q --keep-going --profile "$(trial_profile)"
-    --config 'profile.dev.package.java-runtime.opt-level=2')
+    --config 'profile.dev.package.java-to-rust-runtime.opt-level=2')
   local profile=${TRIAL_PROFILE:-dev}
   case ${TRIAL_LTO:-} in
     '') ;;

@@ -415,7 +415,7 @@ fn corpus_matches_java() {
     let runtime = manifest.join("../runtime").canonicalize().unwrap();
     let cargo_toml = format!(
         "[package]\nname = \"corpus\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
-         [dependencies]\njava-runtime = {{ path = {runtime:?} }}\n\n[profile.dev]\n\
+         [dependencies]\njava-runtime = {{ package = \"java-to-rust-runtime\", path = {runtime:?} }}\n\n[profile.dev]\n\
          debug = 0\nincremental = false\n\n[workspace]\n"
     );
     write_if_changed(&work.join("Cargo.toml"), &cargo_toml);
