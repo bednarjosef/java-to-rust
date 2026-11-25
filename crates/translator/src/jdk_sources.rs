@@ -110,30 +110,60 @@ fn unpacked() -> Result<PathBuf, String> {
     if dir.join("java.base").is_dir() {
         return Ok(dir);
     }
+    unpack(&zip, &dir, |_| true).map_err(|e| format!("--jdk: {e}"))?;
+    Ok(dir)
+}
+
+/// Unpacks the zip or jar file `zip` into `dir`, with the `jar` tool of the JDK that `java` runs,
+/// then deletes the files that `keep` refuses. It unpacks into a directory of this process's own,
+/// renamed into place at the end, so that translators started at the same time never read a
+/// half-unpacked one; a `dir` that is already there is left as it is.
+pub(crate) fn unpack(zip: &Path, dir: &Path, keep: impl Fn(&Path) -> bool) -> Result<(), String> {
+    if dir.is_dir() {
+        return Ok(());
+    }
     let partial = dir.with_extension(format!("partial-{}", std::process::id()));
     let fail = |e: String| {
         let _ = std::fs::remove_dir_all(&partial);
-        format!("--jdk: cannot unpack {} into {}: {e}", zip.display(), dir.display())
+        format!("cannot unpack {} into {}: {e}", zip.display(), dir.display())
     };
     std::fs::create_dir_all(&partial).map_err(|e| fail(e.to_string()))?;
-    let jar = home.join("bin/jar");
-    let status = std::process::Command::new(if jar.is_file() { jar.as_os_str() } else { "jar".as_ref() })
+    let jar = crate::lower::system::jdk_properties()
+        .and_then(|p| p.get("java.home"))
+        .map(|home| Path::new(home).join("bin/jar"))
+        .filter(|jar| jar.is_file())
+        .unwrap_or_else(|| PathBuf::from("jar"));
+    let status = std::process::Command::new(&jar)
         .args(["--extract", "--file"])
-        .arg(&zip)
+        .arg(zip)
         .current_dir(&partial)
         .status()
         .map_err(|e| fail(format!("running jar: {e}")))?;
     if !status.success() {
         return Err(fail(format!("jar exited with {status}")));
     }
-    match std::fs::rename(&partial, &dir) {
-        Ok(()) => Ok(dir),
-        // Another translator unpacked the same sources first.
-        Err(_) if dir.join("java.base").is_dir() => {
+    remove_unkept(&partial, &partial, &keep);
+    match std::fs::rename(&partial, dir) {
+        Ok(()) => Ok(()),
+        // Another translator unpacked the same file first.
+        Err(_) if dir.is_dir() => {
             let _ = std::fs::remove_dir_all(&partial);
-            Ok(dir)
+            Ok(())
         }
         Err(e) => Err(fail(e.to_string())),
+    }
+}
+
+/// Deletes the files under `dir` whose path relative to `root` `keep` refuses.
+fn remove_unkept(root: &Path, dir: &Path, keep: &impl Fn(&Path) -> bool) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_unkept(root, &path, keep);
+        } else if !keep(path.strip_prefix(root).unwrap_or(&path)) {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }
 

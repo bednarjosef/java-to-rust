@@ -121,6 +121,15 @@ libraries' sources go in with `--library`:
 cargo run --release -p java-to-rust -- --main com.example.Main --source src/ --jdk --crate out/
 ```
 
+A Maven or Gradle project can be given as it is; its build tool resolves the dependencies,
+whose sources jars go in with the program. Libraries often reach code the translator rejects;
+`--census` builds the program anyway, and `--approximate-messages` lets exception messages differ
+from the JVM's ([docs/usage.md](docs/usage.md)):
+
+```bash
+cargo run --release -p java-to-rust -- --project my-app/ --census --approximate-messages --crate out/
+```
+
 The translator's binary is self-contained: `cargo install --path crates/translator` puts it on
 your `PATH`, and it runs from anywhere while this checkout stays where it is (translated projects
 build against its `crates/runtime`).

@@ -8,7 +8,8 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: java-to-rust [--timings] <Input.java> [-o <output.rs> | --crate <directory>]
-       java-to-rust [--timings] --main <package.Class> [--source <root>]... [--jdk] [--library <root>]... [--keep-going]
+       java-to-rust [--timings] [--main <package.Class>] [--project <maven or gradle directory>]
+                    [--source <root>]... [--jdk] [--library <root>]... [--keep-going]
                     [--named-locals] [--approximate-messages] [--add-exports <module>/<package>=<to>]...
                     [<File.java>]... [-o <output.rs> | --crate <directory> [--crates <n>]
                      | --survey [--survey-json <file>]
@@ -61,6 +62,7 @@ fn run(mut args: Vec<String>) -> Result<(), String> {
                 | "--source"
                 | "--library"
                 | "--jdk"
+                | "--project"
                 | "--survey"
                 | "--survey-json"
                 | "--census"
@@ -121,6 +123,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
     let mut save_tree = None;
     let mut from_tree = None;
     let mut jdk = false;
+    let mut project = None;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let mut value = || args.next().cloned().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"));
@@ -129,6 +132,7 @@ fn run_program(args: &[String]) -> Result<(), String> {
             "--source" => program.sources.push(value()?.into()),
             "--library" => program.libraries.push(value()?.into()),
             "--jdk" => jdk = true,
+            "--project" => project = Some(value()?),
             "-o" | "--crate" => output = Some((arg.as_str(), value()?)),
             "--survey" => survey = true,
             "--survey-json" => {
@@ -163,8 +167,25 @@ fn run_program(args: &[String]) -> Result<(), String> {
             file => program.files.push(file.into()),
         }
     }
+    if let Some(dir) = project {
+        let build = java_to_rust::timings::phase("project build", || {
+            java_to_rust::build_project::read(std::path::Path::new(&dir))
+        })?;
+        if !build.without_sources.is_empty() {
+            eprintln!(
+                "note: these dependencies publish no sources, so code that uses them is rejected: {}",
+                build.without_sources.join(", ")
+            );
+        }
+        program.sources.extend(build.sources);
+        program.libraries.extend(build.libraries);
+        if program.main.is_empty() {
+            program.main = build.main.unwrap_or_default();
+        }
+        jdk = true;
+    }
     if program.main.is_empty() {
-        return Err(format!("--main is required for a program\n{USAGE}"));
+        return Err(format!("--main is required for a program (--project found no main class)\n{USAGE}"));
     }
     if jdk {
         let roots: Vec<_> = program.sources.iter().chain(&program.libraries).cloned().collect();
