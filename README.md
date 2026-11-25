@@ -1,20 +1,35 @@
 # java-to-rust
 
-Translates Java programs into Rust programs that print exactly what the Java program prints.
+Translates whole Java programs into Rust programs that print exactly what the Java program
+prints, in minutes, on one machine.
 
-It is a compiler, not an LLM: javac parses and type-checks the source, a set of program analyses
-works out what each value can and cannot do, and a code generator writes Rust from those facts.
-Where the analyses prove it safe, the output is plain Rust (owned structs, `Vec`, plain
-arithmetic, no null checks); everywhere else it falls back to a faithful form that keeps Java's
-behaviour.
+Porting a large codebase with AI agents means having a model read and rewrite every line: hours
+of agent time, a token bill that grows with the code, and a review of everything it wrote. Even
+then, the best models get fewer than half of real translations right in research benchmarks
+([RustRepoTrans](https://arxiv.org/abs/2411.13990),
+[a study of real-world code](https://arxiv.org/abs/2405.11514)). java-to-rust is a compiler instead: it costs
+nothing per run, gives the same output every time, and is checked against the JVM.
 
-It handles real programs, not just small examples:
+| program | Java in | Rust out | translation | Rust build |
+|---|---:|---:|---:|---:|
+| javac, the Java compiler | 178,000 lines, plus the JDK code it uses | 951,000 lines | 65 s | under 3 min |
+| Minecraft server 26.3 | 547,000 lines, plus its libraries and the JDK | 7.4 million lines | about 7 min | 29 min |
 
-- **Its test suite:** over a thousand Java programs, each checked against the JVM's output.
-- **javac itself:** the translated compiler writes the same class files as the real one, byte
-  for byte.
-- **A Minecraft server:** the translated server runs. It starts in under a second and uses a
-  third of the JVM's memory.
+Times on a 16-core laptop (Ryzen AI 7 350). The Rust build is a quick release build for javac
+and an optimized release build split into 14 crates for the server.
+
+The results run like the originals:
+
+- **javac:** the translated compiler writes the same class files as the real one, byte for byte.
+- **The Minecraft server** starts in under a second and uses a third of the JVM's memory.
+- **The test suite:** over a thousand Java programs, each checked against the JVM's output.
+
+## How it works
+
+javac parses and type-checks the source, a set of program analyses works out what each value can
+and cannot do, and a code generator writes Rust from those facts. Where the analyses prove it
+safe, the output is plain Rust (owned structs, `Vec`, plain arithmetic, no null checks);
+everywhere else it falls back to a faithful form that keeps Java's behaviour.
 
 ## Example
 
