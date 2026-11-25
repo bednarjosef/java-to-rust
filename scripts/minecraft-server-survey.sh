@@ -161,7 +161,7 @@ keep_java() {
 }
 
 # Decompiles one jar into a directory with Vineflower, keeping only the Java sources. The flags
-# are those haste uses: generic signatures, synthetic members renamed. With a third argument of yes, every other
+# are: generic signatures, synthetic members renamed. With a third argument of yes, every other
 # library jar is given to Vineflower as a library (-e), so that it knows the generic signatures of
 # the classes the code uses. Without them it cannot tell where a generic call needs its type
 # arguments written out (`RecordCodecBuilder.<T>mapCodec(...)`, `ImmutableList.<T>builder()`) and

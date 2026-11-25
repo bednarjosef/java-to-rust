@@ -49,6 +49,17 @@ of three ways, all in `crates/translator/java` and all holding only our own code
 `scripts/check.sh` fails, with `JAVA_BASE_SOURCES` set, when one of these files shares more than
 a few lines with the JDK's file of the same path.
 
+## Safe defaults, plainer forms
+
+Every value starts at a safe default: an object is `Arc<RefCell<C>>`, a reference that may be
+null an `Option`, an array a shared `java::Array<T>`, arithmetic wrapping. Analyses move values
+to plainer forms (`Arc<C>`, plain structs, `Vec`, plain `+`) where they prove it changes nothing.
+The generator writes the plain form of a construct only where a fact allows it, and the faithful
+form otherwise, so a better analysis improves the output without touching the generator. The
+runtime crate (`crates/runtime`) supplies what Rust lacks: Java's number semantics and printing,
+strings and builders, `String.format`, regular expressions, charsets, threads and monitors, the
+native methods of the JDK, and the garbage collector that frees objects.
+
 ## Size, on 2026-10-21
 
 | part | files | lines |

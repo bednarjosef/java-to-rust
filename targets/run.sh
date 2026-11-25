@@ -15,7 +15,7 @@
 # A program whose translated crate is the same as in an earlier run that passed, with the same
 # runtime crate, toolchain, input and arguments, is not built and run again: its output and exit
 # code are taken from the checks' cache (CHECK_CACHE, by default ~/.cache/java-to-rust-checks;
-# see "Testing" in README.md) and compared with Name.expected as a fresh run's would be.
+# see docs/testing.md) and compared with Name.expected as a fresh run's would be.
 # CHECK_FRESH=1 builds and runs every program, and stores the passing runs anew.
 # Limits in seconds: TRANSLATE_TIMEOUT (600), BUILD_TIMEOUT (900), RUN_TIMEOUT (20).
 set -u

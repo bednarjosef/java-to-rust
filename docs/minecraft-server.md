@@ -443,7 +443,7 @@ dependencies can be built: it stops only at a rejected piece, as any translation
 The `bench` step's sprint of 100,000 ticks, on seed 1 with the chunks within 5 chunks of the centre
 force-loaded, with the trial of the census of the translator as it is now built in release (thin
 LTO, 12 groups of body crates). Each run was pinned to the processor's four fast cores and their
-second threads (`taskset -c 0,2,4,6,8,10,12,14`: this laptop's Ryzen AI 7 350 has four 5.1 GHz Zen 5
+second threads (`taskset -c 0,2,4,6,8,10,12,14`: the test machine's Ryzen AI 7 350 has four 5.1 GHz Zen 5
 cores and four 3.5 GHz Zen 5c cores, whose clock is about two thirds of the fast ones'), three or
 four runs of each, alternating, at a load under 3:
 
