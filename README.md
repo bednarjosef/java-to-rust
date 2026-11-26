@@ -2,6 +2,8 @@
 
 Translates whole Java programs into Rust programs with the exact same output, in minutes, on
 one machine.
+It is a program, not an LLM, an agent harness or a skill: one command reads the Java and writes
+the Rust, with no model and no one in the loop.
 
 Porting a large codebase with AI agents means having a model read and rewrite every line: hours
 of agent time, a token bill that grows with the code, and a review of everything it wrote. Even
