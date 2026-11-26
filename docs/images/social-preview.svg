@@ -47,24 +47,24 @@
   <rect x="0" y="330" width="1280" height="26" fill="url(#rim)" clip-path="url(#world)"/>
 
   <!-- Name and line -->
-  <g font-family="Crimson Pro" text-anchor="middle" fill="#fffaf3">
-    <text x="640" y="196" font-size="96" font-weight="400" letter-spacing="0.5">java-to-rust</text>
-    <text x="640" y="256" font-size="32" font-weight="400">Translates whole Java programs into Rust, with the exact same output.</text>
+  <g font-family="Crimson Pro" text-anchor="middle">
+    <text x="640" y="196" font-size="96" font-weight="500" letter-spacing="0.5" fill="#1b2f46">java-to-rust</text>
+    <text x="640" y="256" font-size="32" font-weight="400" fill="#2d4762">Translates whole Java programs into Rust, with the exact same output.</text>
   </g>
 
   <!-- Results -->
   <g font-family="Crimson Pro" text-anchor="middle" fill="#f4ece2">
     <text x="250" y="468" font-size="34" font-weight="500">Java compiler</text>
-    <text x="250" y="506" font-size="23" font-weight="300" fill-opacity="0.8">translated to Rust in 65 seconds</text>
-    <text x="250" y="536" font-size="23" font-weight="300" fill-opacity="0.8">951,000 lines of Rust</text>
+    <text x="250" y="506" font-size="23" font-weight="400" fill-opacity="0.88">translated to Rust in 65 seconds</text>
+    <text x="250" y="536" font-size="23" font-weight="400" fill-opacity="0.88">951,000 lines of Rust</text>
 
     <text x="640" y="468" font-size="34" font-weight="500">Minecraft 26.3</text>
-    <text x="640" y="506" font-size="23" font-weight="300" fill-opacity="0.8">translated to Rust in 6 minutes</text>
-    <text x="640" y="536" font-size="23" font-weight="300" fill-opacity="0.8">7.3 million lines of Rust</text>
+    <text x="640" y="506" font-size="23" font-weight="400" fill-opacity="0.88">translated to Rust in 6 minutes</text>
+    <text x="640" y="536" font-size="23" font-weight="400" fill-opacity="0.88">7.3 million lines of Rust</text>
 
     <text x="1030" y="468" font-size="34" font-weight="500">1,000+ programs</text>
-    <text x="1030" y="506" font-size="23" font-weight="300" fill-opacity="0.8">the exact same output, every one</text>
-    <text x="1030" y="536" font-size="23" font-weight="300" fill-opacity="0.8">99.9% of Minecraft's code translates</text>
+    <text x="1030" y="506" font-size="23" font-weight="400" fill-opacity="0.88">the exact same output, every one</text>
+    <text x="1030" y="536" font-size="23" font-weight="400" fill-opacity="0.88">99.9% of Minecraft's code translates</text>
 
     <g stroke="#f4ece2" stroke-opacity="0.22" stroke-width="1">
       <path d="M445 452 V546"/>
