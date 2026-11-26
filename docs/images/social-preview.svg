@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <!-- GitHub's social preview for the repository (rendered to social-preview.png, 1280x640). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14161b"/>
+      <stop offset="1" stop-color="#1c1f26"/>
+    </linearGradient>
+    <linearGradient id="arrow" gradientUnits="userSpaceOnUse" x1="620" y1="0" x2="698" y2="0">
+      <stop offset="0" stop-color="#e76f00"/>
+      <stop offset="1" stop-color="#ce422b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="80" y="150" font-family="JetBrainsMono Nerd Font" font-weight="800" font-size="84" fill="#f2f2f2">
+    <tspan fill="#f0a35e">java</tspan><tspan fill="#8a8f98">-to-</tspan><tspan fill="#f07a5e">rust</tspan>
+  </text>
+  <text x="82" y="214" font-family="Inter" font-weight="500" font-size="32" fill="#d6d8dc">Translates whole Java programs into Rust that prints</text>
+  <text x="82" y="256" font-family="Inter" font-weight="500" font-size="32" fill="#d6d8dc">exactly what the Java program prints. A compiler, not an LLM.</text>
+
+  <!-- Code pair -->
+  <g font-family="JetBrainsMono Nerd Font" font-size="21">
+    <rect x="80" y="306" width="520" height="132" rx="12" fill="#0f1115" stroke="#2b2f37"/>
+    <text x="104" y="342" fill="#8a8f98" font-size="16">Shapes.java</text>
+    <text x="104" y="378" fill="#d6d8dc"><tspan fill="#f0a35e">record</tspan> Circle(<tspan fill="#f0a35e">double</tspan> r)</text>
+    <text x="152" y="412" fill="#d6d8dc"><tspan fill="#f0a35e">implements</tspan> Shape { … }</text>
+
+    <path d="M620 372 H690" stroke="url(#arrow)" stroke-width="6" stroke-linecap="round"/>
+    <path d="M676 356 L698 372 L676 388" fill="none" stroke="#ce422b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <rect x="718" y="306" width="482" height="132" rx="12" fill="#0f1115" stroke="#2b2f37"/>
+    <text x="742" y="342" fill="#8a8f98" font-size="16">shapes.rs</text>
+    <text x="742" y="378" fill="#d6d8dc"><tspan fill="#f07a5e">struct</tspan> ShapesCircle { r: <tspan fill="#f07a5e">f64</tspan> }</text>
+    <text x="742" y="412" fill="#d6d8dc"><tspan fill="#f07a5e">impl</tspan> ShapesCircle { … }</text>
+  </g>
+
+  <!-- Results -->
+  <g font-family="Inter">
+    <text x="80" y="508" font-weight="700" font-size="30" fill="#f2f2f2">javac</text>
+    <text x="80" y="546" font-weight="400" font-size="23" fill="#a9adb4">178k lines → Rust in 65 s,</text>
+    <text x="80" y="576" font-weight="400" font-size="23" fill="#a9adb4">same class files byte for byte</text>
+
+    <text x="500" y="508" font-weight="700" font-size="30" fill="#f2f2f2">Minecraft server</text>
+    <text x="500" y="546" font-weight="400" font-size="23" fill="#a9adb4">547k lines → Rust in 6 min,</text>
+    <text x="500" y="576" font-weight="400" font-size="23" fill="#a9adb4">a third of the JVM's memory</text>
+
+    <text x="920" y="508" font-weight="700" font-size="30" fill="#f2f2f2">1,000+ programs</text>
+    <text x="920" y="546" font-weight="400" font-size="23" fill="#a9adb4">each checked against</text>
+    <text x="920" y="576" font-weight="400" font-size="23" fill="#a9adb4">the JVM's output</text>
+  </g>
+</svg>
