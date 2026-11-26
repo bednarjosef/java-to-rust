@@ -1,4 +1,14 @@
-# java-to-rust
+<p align="center">
+  <img alt="java-to-rust: translates whole Java programs into Rust, with the exact same output. No LLM, no agents, no skills: one program does the whole job on its own." src="docs/images/social-preview.png" width="100%">
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-3f6f93?style=flat-square&labelColor=1b2f46&color=3f6f93"></a>
+  <a href="crates/runtime"><img alt="Runtime license: MIT OR Apache-2.0" src="https://img.shields.io/badge/runtime-MIT%20OR%20Apache--2.0-3f6f93?style=flat-square&labelColor=1b2f46&color=3f6f93"></a>
+  <a href="#build-and-run"><img alt="Rust 2024 edition" src="https://img.shields.io/badge/Rust-2024%20edition-3f6f93?style=flat-square&labelColor=1b2f46&color=3f6f93"></a>
+  <a href="#build-and-run"><img alt="JDK 21 or newer" src="https://img.shields.io/badge/JDK-21%2B-3f6f93?style=flat-square&labelColor=1b2f46&color=3f6f93"></a>
+  <a href="docs/testing.md"><img alt="Tests: over a thousand programs" src="https://img.shields.io/badge/tests-1%2C000%2B%20programs-3f6f93?style=flat-square&labelColor=1b2f46&color=3f6f93"></a>
+</p>
 
 Translates whole Java programs into Rust programs with the exact same output, in minutes, on
 one machine.
