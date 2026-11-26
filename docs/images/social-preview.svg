@@ -48,9 +48,11 @@
 
   <!-- Name and line -->
   <g font-family="Crimson Pro" text-anchor="middle">
-    <text x="640" y="196" font-size="96" font-weight="500" letter-spacing="0.5" fill="#1b2f46">java-to-rust</text>
-    <text x="640" y="256" font-size="32" font-weight="400" fill="#2d4762">Translates whole Java programs into Rust, with the exact same output.</text>
-    <text x="640" y="298" font-size="23" font-weight="400" font-style="italic" fill="#3a4f66">Not an LLM, an agent or a skill: one program that does it all on its own.</text>
+    <text x="640" y="150" font-size="96" font-weight="500" letter-spacing="0.5" fill="#1b2f46">java-to-rust</text>
+    <g font-size="31" font-weight="400" fill="#2d4762">
+      <text x="640" y="214">Translates whole Java programs into Rust, with the exact same output.</text>
+      <text x="640" y="256">No LLM, no agents, no skills: one program does the whole job on its own.</text>
+    </g>
   </g>
 
   <!-- Results -->
