@@ -6,7 +6,10 @@ they are licensed under either of the [Apache License, Version 2.0](../../runtim
 or the [MIT license](../../runtime/LICENSE-MIT), at your option:
 
 - `overlay/`: the translator's classes that replace or add to the JDK's;
-- `patches/`: the translator's edits of the JDK's classes;
+- `patches/`: the translator's edits of the JDK's classes. Where a patch quotes or adapts the
+  JDK's code (the texts that `@Edit` finds and replaces, a member that `@Replace` rewrites from
+  the JDK's), that code keeps the JDK's license (GPL-2.0 with the Classpath Exception for
+  OpenJDK); what the translator adds is MIT OR Apache-2.0;
 - `Standard.java`, `Functional.java`, `Threads.java`, `ThreadLocalStub.java` and `Reflection.java`.
 
 The other files here (`JavaTree.java`, `BytecodeNames.java`, `JdkPatch.java`, `MissingClasses.java`,
