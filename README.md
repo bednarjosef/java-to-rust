@@ -1,7 +1,7 @@
 # java-to-rust
 
-Translates whole Java programs into Rust programs that print exactly what the Java program
-prints, in minutes, on one machine.
+Translates whole Java programs into Rust programs with the exact same output, in minutes, on
+one machine.
 
 Porting a large codebase with AI agents means having a model read and rewrite every line: hours
 of agent time, a token bill that grows with the code, and a review of everything it wrote. Even
