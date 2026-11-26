@@ -2968,6 +2968,11 @@ struct Walk<'t> {
     /// The classes that the types of the components of the records found so far name, which
     /// reflection hands out as `Class` values (`reflection.rs`).
     record_types: HashSet<String>,
+    /// The classes that the types of the fields of the classes whose fields a lookup lists
+    /// (`getDeclaredFields()` on a `Class` value that is not a class literal) name, which
+    /// reflection hands out as `Class` values: gson reads a `List<Item>` field's objects through
+    /// the field's generic type (`reflection.rs`).
+    field_types: HashSet<String>,
     reflected_keys: HashSet<(String, String)>,
     /// What the lookups of reflection keep from one search for members to the next, the number
     /// of classes declared so far, and the classes declared again (`redeclare_units`), in the

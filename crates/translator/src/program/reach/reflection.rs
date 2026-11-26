@@ -6,7 +6,12 @@
 //! classes it can look in are those that code can get a `Class` value of without naming them in
 //! a type: the classes that string literals of reachable code name (`by_name`), the locale data
 //! that a computed name finds, and, for methods and fields, the classes of the class literals of
-//! reachable code, as for constructors on a `Class<? extends T>` of a `T` other than `Object`;
+//! reachable code, as for constructors on a `Class<? extends T>` of a `T` other than `Object`
+//! and for the constructor without parameters on any `Class` value (gson makes an object of a
+//! class whose fields it reads with that constructor); the classes that the types of the fields
+//! of the classes a lookup of every field on such a value lists name, with their type arguments
+//! (`Walk::field_types`: gson reads a `List<Item>` field's objects through its generic type), for
+//! fields and the constructor without parameters;
 //! and the classes that the flow of `Class` values of an earlier translation found that the
 //! lookups of the kind get (`Walk::flow_classes`, `analysis::reflection_table::missing`): an
 //! object's `getClass()`, or its `getSuperclass()`, with no class literal anywhere. A lookup on a
@@ -72,6 +77,10 @@ pub const RECORD_COMPONENT_METHODS: [&str; 6] =
 
 /// The key in `Walk::reflected_keys` of a record whose components are found.
 const RECORD_KEY: &str = "<record>";
+
+/// The key in `Walk::reflected_keys` of a class whose fields a lookup of every field on a `Class`
+/// value that is not a class literal lists (`Walk::field_types`).
+const FIELDS_KEY: &str = "<fields>";
 
 /// The classes that the flow of `Class` values found that the lookups of each kind look in
 /// (`Walk::flow_classes`).
@@ -170,6 +179,19 @@ fn is_subtype_of_object(bound: &str) -> bool {
     bound == OBJECT
 }
 
+/// Whether `lookup` is of the constructor without parameters, on a `Class` value that may be any
+/// class.
+fn no_parameters_on_any(lookup: &Lookup) -> bool {
+    lookup.kind == Kind::Constructor && lookup.no_parameters && is_subtype_of_object(&lookup.bound)
+}
+
+/// The group of the classes that `lookup`, without a class literal, looks in
+/// (`ReflectCache::candidates`): by its bound and kind, the constructor without parameters on any
+/// class apart.
+fn group_key(lookup: &Lookup) -> (String, Kind, bool) {
+    (candidate_bound(lookup).to_string(), lookup.kind, no_parameters_on_any(lookup))
+}
+
 /// The bound of the classes that a lookup without a class literal looks in: any record's
 /// components are read, whatever the `Class` value's type says.
 fn candidate_bound(lookup: &Lookup) -> &str {
@@ -211,7 +233,7 @@ pub(super) struct ReflectCache {
     unsettled: HashMap<String, (usize, usize)>,
     settled: HashSet<String>,
     /// The classes that the lookups without a class literal of each bound and kind look in.
-    candidates: HashMap<(String, Kind), Candidates>,
+    candidates: HashMap<(String, Kind, bool), Candidates>,
     /// How many of its classes (`Candidates::order`, or its class literal) each lookup whose
     /// names do not depend on the strings has looked in.
     looked: HashMap<Lookup, usize>,
@@ -233,7 +255,7 @@ struct Candidates {
     /// The classes checked against the bound, and the sizes of the sets they come from when they
     /// last were.
     checked: HashSet<String>,
-    sizes: [usize; 6],
+    sizes: [usize; 7],
 }
 
 /// Notes a class that the cache keeps something of among the settled or the unsettled ones
@@ -381,8 +403,13 @@ impl<'t> Walk<'t> {
             // A record whose components are found: the classes that their types name are
             // `Class` values that reflection gives, which may be records read the same way.
             if key.1 == RECORD_KEY && self.reach.records.insert(class.clone()) {
-                for name in self.record_component_types(class) {
+                for name in self.field_types_of(class) {
                     more |= self.record_types.insert(name);
+                }
+            }
+            if key.1 == FIELDS_KEY {
+                for name in self.field_types_of(class) {
+                    more |= self.field_types.insert(name);
                 }
             }
             // `Class.getRecordComponents` found by reflection reads the components of any record.
@@ -401,9 +428,9 @@ impl<'t> Walk<'t> {
         loaded || more || !found.is_empty()
     }
 
-    /// The classes of the program that the declared types of the components of the record
-    /// `class` name, with their type arguments.
-    fn record_component_types(&self, class: &str) -> Vec<String> {
+    /// The classes of the program that the declared types of the fields of `class` that are not
+    /// static (a record's components) name, with their type arguments.
+    fn field_types_of(&self, class: &str) -> Vec<String> {
         let Some((decl, _)) = self.classes.get(class) else { return Vec::new() };
         let mut out = Vec::new();
         for member in record_fields(decl) {
@@ -444,10 +471,7 @@ impl<'t> Walk<'t> {
         } = cache;
         for lookup in &self.lookups {
             // The classes it can look in: its class literal, or those of its bound and kind.
-            let group = lookup
-                .literal
-                .is_none()
-                .then(|| &candidates[&(candidate_bound(lookup).to_string(), lookup.kind)]);
+            let group = lookup.literal.is_none().then(|| &candidates[&group_key(lookup)]);
             let has = |class: &str| match (group, &lookup.literal) {
                 (Some(group), _) => group.sorted.contains(class),
                 (None, literal) => literal.as_deref() == Some(class),
@@ -581,6 +605,17 @@ impl<'t> Walk<'t> {
                     note_chain(self, unsettled, settled, class);
                 }
                 let owners = &supertypes[class];
+                // The classes whose fields a lookup of every field on a `Class` value that may be
+                // any class lists: their fields' types name classes that reflection hands out.
+                let key = (class.clone(), FIELDS_KEY.to_string());
+                if lookup.kind == Kind::Field
+                    && lookup.every
+                    && group.is_some()
+                    && !self.reflected_keys.contains(&key)
+                    && seen.insert(key.clone())
+                {
+                    found.push((class.clone(), FIELDS_KEY.to_string(), key, false));
+                }
                 let names: Vec<String> = match (&lookup.name, lookup.kind) {
                     (_, Kind::Constructor) => vec!["<init>".to_string()],
                     (Some(name), _) if !lookup.every => vec![name.clone()],
@@ -690,7 +725,7 @@ impl<'t> Walk<'t> {
                     if group.sorted.contains(class) {
                         group.order.push(class.clone());
                     } else if group.checked.remove(class) {
-                        group.sizes = [usize::MAX; 6];
+                        group.sizes = [usize::MAX; 7];
                     }
                 }
             }
@@ -704,10 +739,11 @@ impl<'t> Walk<'t> {
             self.annotation_classes.len(),
             self.class_literals.len(),
             self.record_types.len(),
+            self.field_types.len(),
         ];
         for lookup in self.lookups.iter().filter(|l| l.literal.is_none()) {
             let bound = candidate_bound(lookup);
-            let key = (bound.to_string(), lookup.kind);
+            let key = group_key(lookup);
             if cache.candidates.get(&key).is_some_and(|group| group.sizes == sizes) {
                 continue;
             }
@@ -718,6 +754,14 @@ impl<'t> Walk<'t> {
             sources.extend(self.reach.found_by_name.iter());
             sources.extend(flow(lookup.kind));
             match lookup.kind {
+                // A constructor without parameters on a `Class` value that may be any class looks
+                // where a lookup of fields does: gson makes an object of a class it reads the
+                // fields of with that constructor (`getDeclaredConstructor()`).
+                Kind::Constructor if no_parameters_on_any(lookup) => {
+                    sources.extend(self.annotation_classes.iter());
+                    sources.extend(self.class_literals.iter());
+                    sources.extend(self.field_types.iter());
+                }
                 Kind::Constructor => {
                     sources.extend(self.annotation_classes.iter());
                     // A `Class<? extends T>` below `Object` holds the class literals of `T`'s
@@ -731,7 +775,11 @@ impl<'t> Walk<'t> {
                     sources.extend(self.class_literals.iter());
                     sources.extend(self.record_types.iter());
                 }
-                _ => sources.extend(self.class_literals.iter()),
+                Kind::Field => {
+                    sources.extend(self.class_literals.iter());
+                    sources.extend(self.field_types.iter());
+                }
+                Kind::Method => sources.extend(self.class_literals.iter()),
             }
             for class in sources {
                 if !group.checked.contains(class) {
@@ -843,9 +891,10 @@ impl<'t> Walk<'t> {
 
     /// The classes that a lookup of each kind on a `Class` value that is not a class literal may
     /// look in, whatever the bound of its type (`Reach::lookup_candidates`), as `reflected_members`
-    /// takes them: for constructors, without the class literals that a lookup on a
-    /// `Class<? extends T>` below `Object` looks in too, so that one on any other `Class` value
-    /// that gets one of those has it put in (at the cost of a translation made again).
+    /// takes them: for constructors, without the class literals and field types that a lookup on
+    /// a `Class<? extends T>` below `Object`, or of the constructor without parameters, looks in
+    /// too, so that one with parameter types on any other `Class` value that gets one of those has
+    /// it put in (at the cost of a translation made again).
     pub(super) fn lookup_candidates(&self) -> BTreeMap<Kind, BTreeSet<String>> {
         let mut out = BTreeMap::new();
         for kind in [Kind::Method, Kind::Field, Kind::Constructor] {
@@ -854,6 +903,10 @@ impl<'t> Walk<'t> {
             all.extend(self.flow_classes.get(&kind).into_iter().flatten().cloned());
             match kind {
                 Kind::Constructor => all.extend(self.annotation_classes.iter().cloned()),
+                Kind::Field => {
+                    all.extend(self.class_literals.iter().cloned());
+                    all.extend(self.field_types.iter().cloned());
+                }
                 _ => all.extend(self.class_literals.iter().cloned()),
             }
             out.insert(kind, all);

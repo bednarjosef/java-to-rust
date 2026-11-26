@@ -98,8 +98,16 @@ program where such a lookup can happen, so they can be checked before the progra
   annotations, which code that reads them makes objects of (log4j's
   `@PluginVisitorStrategy(PluginValueVisitor.class)`), and on a `Class<? extends T>` of a `T`
   other than `Object` those of its class literals too (the JDK's key store delegator makes
-  `PKCS12KeyStore.class`'s object); or only the class of the receiver when it is a class
-  literal; plus the classes that the points-to facts find a lookup of that kind gets (below). A
+  `PKCS12KeyStore.class`'s object), and for the constructor without parameter types
+  (`getDeclaredConstructor()`, `newInstance()`) on any `Class` value those of its class literals
+  too, as gson makes an object of a class whose fields it reads with that constructor, so that
+  its field initializers run. A lookup of every field (`getDeclaredFields()`) on a `Class` value
+  that is not a class literal also adds the classes that the types of the fields it lists name,
+  type arguments included, to the classes that lookups of fields and of the constructor without
+  parameter types look in, in turn: gson reads a `List<Item>` field's objects through the
+  field's generic type, and `Item` has no class literal. Or only the class of the receiver when
+  it is a class literal; plus the classes that the points-to facts find a lookup of that kind
+  gets (below). A
   lookup on a `Class<? extends T>` finds only the classes that are or extend or implement `T`.
   The annotations of a class that reachable code names are reached with
   it, values included. The names of the classes
