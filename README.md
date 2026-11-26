@@ -15,6 +15,9 @@ one machine.
 It is a program, not an LLM, an agent harness or a skill: one command reads the Java and writes
 the Rust, with no model and no one in the loop.
 
+Using a coding agent? Point it at [AGENTS.md](AGENTS.md): it explains how to install and run the
+translator, what it does not support, and how to work on it.
+
 Porting a large codebase with AI agents means having a model read and rewrite every line: hours
 of agent time, a token bill that grows with the code, and a review of everything it wrote. Even
 then, the best models get fewer than half of real translations right in research benchmarks
