@@ -160,6 +160,7 @@ exactly. Java's output is the expected result, so no expectations are written by
 
 ## Documentation
 
+- [AGENTS.md](AGENTS.md): for coding agents that use the translator or work on it
 - [What Java is supported](docs/supported-java.md), per language and library area
 - [Architecture](docs/architecture.md): the pipeline and each stage
 - [Object model](docs/object-model.md), [closures and nested classes](docs/closures-and-nested-classes.md),
